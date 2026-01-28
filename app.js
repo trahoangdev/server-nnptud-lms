@@ -20,15 +20,15 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files from 'uploads' directory
+// Serve static files from 'uploads' directory (Keep this for file download)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ================== ROUTES ==================
+app.use("/api", router);
+
 app.get("/", (req, res) => {
   res.send("Server NNPTUD LMS (Prisma + PostgreSQL) is running...");
 });
-
-app.use("/api", router);
 
 // ================== SERVER START ==================
 const startServer = async () => {
