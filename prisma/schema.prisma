@@ -1,0 +1,127 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+enum SubmissionStatus {
+  SUBMITTED
+  LATE
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  role      Role     @default(STUDENT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Quan hệ
+  teachingClasses Class[] @relation("TeacherClasses")
+  enrolledClasses Class[] @relation("StudentClasses")
+  
+  createdAssignments Assignment[] // Teacher creates assignments
+  submissions        Submission[] // Student submits work
+  givenGrades        Grade[]      // Teacher grades submissions
+  comments           Comment[]
+}
+
+model Class {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Foreign Key: Teacher
+  teacherId Int
+  teacher   User @relation("TeacherClasses", fields: [teacherId], references: [id])
+
+  // Quan hệ: Students (Implicit Many-to-Many)
+  students User[] @relation("StudentClasses")
+
+  assignments Assignment[]
+}
+
+model Assignment {
+  id          Int       @id @default(autoincrement())
+  title       String
+  description String?
+  dueDate     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Foreign Key: Class
+  classId Int
+  class   Class @relation(fields: [classId], references: [id])
+
+  // Foreign Key: Creator (Teacher)
+  createdById Int?
+  createdBy   User? @relation(fields: [createdById], references: [id])
+
+  submissions Submission[]
+  comments    Comment[]
+}
+
+model Submission {
+  id          Int              @id @default(autoincrement())
+  content     String?
+  fileUrl     String?
+  submittedAt DateTime         @default(now())
+  status      SubmissionStatus @default(SUBMITTED)
+
+  // Foreign Key: Assignment
+  assignmentId Int
+  assignment   Assignment @relation(fields: [assignmentId], references: [id])
+
+  // Foreign Key: Student
+  studentId Int
+  student   User @relation(fields: [studentId], references: [id])
+
+  grade    Grade?
+  comments Comment[]
+}
+
+model Grade {
+  id       Int      @id @default(autoincrement())
+  score    Float
+  gradedAt DateTime @default(now())
+
+  // Foreign Key: Submission
+  submissionId Int        @unique
+  submission   Submission @relation(fields: [submissionId], references: [id])
+
+  // Foreign Key: Grader (Teacher)
+  gradedById Int?
+  gradedBy   User? @relation(fields: [gradedById], references: [id])
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  content   String
+  createdAt DateTime @default(now())
+
+  // Foreign Key: User
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+
+  // Optional: Comment on Assignment OR Submission
+  assignmentId Int?
+  assignment   Assignment? @relation(fields: [assignmentId], references: [id])
+
+  submissionId Int?
+  submission   Submission? @relation(fields: [submissionId], references: [id])
+}
