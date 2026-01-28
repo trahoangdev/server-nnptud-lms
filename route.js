@@ -1,29 +1,133 @@
 import express from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import multer from "multer";
+import { v2 as cloudinary } from "cloudinary";
+import { CloudinaryStorage } from "multer-storage-cloudinary";
 import prisma from "./db.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey123";
 
-/* ============================================================
-   CLASS API
-   ============================================================ */
+/* ================== CLOUDINARY CONFIG ================== */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
-// 1. Tạo lớp mới
-router.post("/classes", async (req, res) => {
-  try {
-    const { name, description, teacherId } = req.body;
-    
-    // Validate teacher
-    const teacher = await prisma.user.findUnique({ where: { id: Number(teacherId) } });
-    if (!teacher || (teacher.role !== "TEACHER" && teacher.role !== "ADMIN")) {
-      return res.status(400).json({ error: "Invalid Teacher ID or User is not a Teacher" });
+// Cấu hình Multer storage dùng Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: "lms-uploads", // Tên thư mục trên Cloudinary
+    resource_type: "auto", // Tự động nhận diện (image, video, raw)
+    allowed_formats: ["jpg", "png", "jpeg", "pdf", "zip", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "txt"], // Định dạng cho phép
+    public_id: (req, file) => Date.now() + "-" + file.originalname.split('.')[0], // Đặt tên file
+  },
+});
+
+const upload = multer({ storage });
+
+/* ================== MIDDLEWARE: AUTH & AUTHORIZATION ================== */
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) return res.status(401).json({ error: "Access Token Required" });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Invalid Token" });
+    req.user = user;
+    next();
+  });
+};
+
+const authorizeRole = (roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Access Denied: You do not have permission" });
     }
+    next();
+  };
+};
 
-    const newClass = await prisma.class.create({
+/* ================== AUTH API ================== */
+
+// Đăng ký
+router.post("/register", async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+    
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return res.status(400).json({ error: "Email already exists" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = await prisma.user.create({
       data: {
         name,
-        description,
-        teacherId: Number(teacherId),
+        email,
+        password: hashedPassword,
+        role: role || "STUDENT",
       },
+    });
+
+    res.status(201).json({ message: "User created", userId: user.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Đăng nhập
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user) return res.status(400).json({ error: "User not found" });
+
+    const validPass = await bcrypt.compare(password, user.password);
+    if (!validPass) return res.status(400).json({ error: "Invalid password" });
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* ================== FILE UPLOAD API (CLOUDINARY) ================== */
+
+router.post("/upload", authenticateToken, upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  
+  // Với CloudinaryStorage, req.file.path chính là URL trên cloud
+  res.json({ 
+    message: "File uploaded to Cloudinary", 
+    fileUrl: req.file.path,
+    filename: req.file.filename 
+  });
+});
+
+/* ================== CLASS API ================== */
+
+router.post("/classes", authenticateToken, authorizeRole(["ADMIN", "TEACHER"]), async (req, res) => {
+  try {
+    const { name, description } = req.body;
+    const teacherId = req.user.role === "TEACHER" ? req.user.id : req.body.teacherId;
+
+    const newClass = await prisma.class.create({
+      data: { name, description, teacherId: Number(teacherId) },
     });
     res.status(201).json(newClass);
   } catch (error) {
@@ -31,16 +135,18 @@ router.post("/classes", async (req, res) => {
   }
 });
 
-// 2. Lấy danh sách lớp
-router.get("/classes", async (req, res) => {
+router.get("/classes", authenticateToken, async (req, res) => {
   try {
-    const { teacherId } = req.query;
-    const filter = teacherId ? { teacherId: Number(teacherId) } : {};
+    const where = {};
+    if (req.user.role === "TEACHER") where.teacherId = req.user.id;
+    if (req.user.role === "STUDENT") {
+       where.students = { some: { id: req.user.id } };
+    }
 
     const classes = await prisma.class.findMany({
-      where: filter,
+      where,
       include: {
-        teacher: { select: { id: true, name: true, email: true } },
+        teacher: { select: { name: true } },
         _count: { select: { students: true } },
       },
     });
@@ -50,89 +156,53 @@ router.get("/classes", async (req, res) => {
   }
 });
 
-// 3. Lấy chi tiết một lớp
-router.get("/classes/:id", async (req, res) => {
+router.get("/classes/:id", authenticateToken, async (req, res) => {
   try {
     const classItem = await prisma.class.findUnique({
       where: { id: Number(req.params.id) },
       include: {
-        teacher: { select: { name: true, email: true } },
-        students: { select: { id: true, name: true, email: true } },
+        teacher: { select: { name: true } },
         assignments: true,
-      },
+      }
     });
-    if (!classItem) return res.status(404).json({ error: "Class not found" });
     res.json(classItem);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 4. Cập nhật thông tin lớp
-router.put("/classes/:id", async (req, res) => {
+router.post("/classes/:id/enroll", authenticateToken, async (req, res) => {
   try {
-    const { name, description } = req.body;
-    const updatedClass = await prisma.class.update({
+    let studentId = req.user.id;
+    if (req.user.role === "TEACHER" || req.user.role === "ADMIN") {
+        if (!req.body.studentId) return res.status(400).json({error: "Provide studentId"});
+        studentId = req.body.studentId;
+    }
+
+    await prisma.class.update({
       where: { id: Number(req.params.id) },
-      data: { name, description },
+      data: { students: { connect: { id: Number(studentId) } } },
     });
-    res.json(updatedClass);
-  } catch (error) {
-    res.status(500).json({ error: "Update failed or Class not found" });
-  }
-});
-
-// 5. Xóa lớp
-router.delete("/classes/:id", async (req, res) => {
-  try {
-    await prisma.class.delete({ where: { id: Number(req.params.id) } });
-    res.json({ message: "Class deleted successfully" });
-  } catch (error) {
-    res.status(500).json({ error: "Delete failed" });
-  }
-});
-
-// 6. Thêm học sinh vào lớp (Enroll)
-router.post("/classes/:id/enroll", async (req, res) => {
-  try {
-    const { studentId } = req.body;
-    const classId = Number(req.params.id);
-
-    // Validate student exists
-    const student = await prisma.user.findUnique({ where: { id: Number(studentId) } });
-    if (!student) return res.status(404).json({ error: "Student not found" });
-
-    const updatedClass = await prisma.class.update({
-      where: { id: classId },
-      data: {
-        students: {
-          connect: { id: Number(studentId) },
-        },
-      },
-      include: { students: true },
-    });
-    res.json(updatedClass);
+    res.json({ message: "Enrolled successfully" });
   } catch (error) {
     res.status(500).json({ error: "Enrollment failed" });
   }
 });
 
-/* ============================================================
-   ASSIGNMENT API
-   ============================================================ */
+/* ================== ASSIGNMENT API ================== */
 
-// 7. Tạo bài tập mới
-router.post("/assignments", async (req, res) => {
+router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const { title, description, dueDate, classId, createdById } = req.body;
+    const { title, description, dueDate, classId, fileUrl } = req.body;
     
     const assignment = await prisma.assignment.create({
       data: {
         title,
         description,
+        fileUrl, // URL từ Cloudinary
         dueDate: dueDate ? new Date(dueDate) : null,
         classId: Number(classId),
-        createdById: Number(createdById),
+        createdById: req.user.id,
       },
     });
     res.status(201).json(assignment);
@@ -141,104 +211,33 @@ router.post("/assignments", async (req, res) => {
   }
 });
 
-// 8. Lấy danh sách bài tập của một lớp
-router.get("/classes/:classId/assignments", async (req, res) => {
-  try {
-    const assignments = await prisma.assignment.findMany({
-      where: { classId: Number(req.params.classId) },
-      include: {
-        createdBy: { select: { name: true } },
-      },
-    });
-    res.json(assignments);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 9. Lấy chi tiết bài tập
-router.get("/assignments/:id", async (req, res) => {
-  try {
-    const assignment = await prisma.assignment.findUnique({
-      where: { id: Number(req.params.id) },
-      include: {
-        submissions: {
-          select: { id: true, studentId: true, status: true, submittedAt: true }
-        }
-      }
-    });
-    if (!assignment) return res.status(404).json({ error: "Assignment not found" });
-    res.json(assignment);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 10. Cập nhật bài tập
-router.put("/assignments/:id", async (req, res) => {
+router.get("/assignments/:id", authenticateToken, async (req, res) => {
     try {
-        const { title, description, dueDate } = req.body;
-        const updated = await prisma.assignment.update({
-            where: { id: Number(req.params.id) },
-            data: { 
-                title, 
-                description, 
-                dueDate: dueDate ? new Date(dueDate) : undefined 
-            }
+        const assignment = await prisma.assignment.findUnique({
+             where: { id: Number(req.params.id) }
         });
-        res.json(updated);
+        res.json(assignment);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// 11. Xóa bài tập
-router.delete("/assignments/:id", async (req, res) => {
+/* ================== SUBMISSION API ================== */
+
+router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
   try {
-    await prisma.assignment.delete({ where: { id: Number(req.params.id) } });
-    res.json({ message: "Assignment deleted" });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/* ============================================================
-   SUBMISSION API
-   ============================================================ */
-
-// 12. Nộp bài (Học sinh)
-router.post("/submissions", async (req, res) => {
-  try {
-    const { content, fileUrl, assignmentId, studentId } = req.body;
-
-    // Check duplicate
-    const existing = await prisma.submission.findFirst({
-      where: {
-        assignmentId: Number(assignmentId),
-        studentId: Number(studentId),
-      },
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "You have already submitted this assignment." });
-    }
-
-    // Check late
-    const assignment = await prisma.assignment.findUnique({ 
-        where: { id: Number(assignmentId) } 
-    });
+    const { content, fileUrl, assignmentId } = req.body;
     
+    const assignment = await prisma.assignment.findUnique({ where: { id: Number(assignmentId) } });
     let status = "SUBMITTED";
-    if (assignment.dueDate && new Date() > new Date(assignment.dueDate)) {
-        status = "LATE";
-    }
+    if (assignment.dueDate && new Date() > new Date(assignment.dueDate)) status = "LATE";
 
     const submission = await prisma.submission.create({
       data: {
         content,
-        fileUrl,
+        fileUrl, // URL từ Cloudinary
         assignmentId: Number(assignmentId),
-        studentId: Number(studentId),
+        studentId: req.user.id,
         status,
       },
     });
@@ -248,13 +247,19 @@ router.post("/submissions", async (req, res) => {
   }
 });
 
-// 13. Xem danh sách bài nộp của một bài tập (Giáo viên)
-router.get("/assignments/:assignmentId/submissions", async (req, res) => {
+router.get("/assignments/:assignmentId/submissions", authenticateToken, async (req, res) => {
   try {
+    const { assignmentId } = req.params;
+    let filter = { assignmentId: Number(assignmentId) };
+
+    if (req.user.role === "STUDENT") {
+        filter.studentId = req.user.id;
+    } 
+
     const submissions = await prisma.submission.findMany({
-      where: { assignmentId: Number(req.params.assignmentId) },
+      where: filter,
       include: {
-        student: { select: { id: true, name: true, email: true } },
+        student: { select: { name: true, email: true } },
         grade: true,
       },
     });
@@ -264,130 +269,25 @@ router.get("/assignments/:assignmentId/submissions", async (req, res) => {
   }
 });
 
-// 14. Xem chi tiết một bài nộp cụ thể
-router.get("/submissions/:id", async (req, res) => {
-    try {
-        const sub = await prisma.submission.findUnique({
-            where: { id: Number(req.params.id) },
-            include: { grade: true, comments: true }
-        });
-        res.json(sub);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+/* ================== GRADE API ================== */
 
-/* ============================================================
-   GRADE API
-   ============================================================ */
-
-// 15. Chấm điểm
-router.post("/grades", async (req, res) => {
+router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const { submissionId, score, gradedById } = req.body;
+    const { submissionId, score } = req.body;
 
     const grade = await prisma.grade.upsert({
       where: { submissionId: Number(submissionId) },
-      update: { 
-        score: parseFloat(score),
-        gradedById: Number(gradedById),
-        gradedAt: new Date()
-      },
+      update: { score: parseFloat(score), gradedById: req.user.id, gradedAt: new Date() },
       create: {
         submissionId: Number(submissionId),
         score: parseFloat(score),
-        gradedById: Number(gradedById),
+        gradedById: req.user.id,
       },
     });
-
     res.json(grade);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-});
-
-// 16. Cập nhật điểm
-router.put("/grades/:id", async (req, res) => {
-    try {
-        const { score } = req.body;
-        const updated = await prisma.grade.update({
-            where: { id: Number(req.params.id) },
-            data: { score: parseFloat(score) }
-        });
-        res.json(updated);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// 17. Xem điểm của một bài nộp
-router.get("/submissions/:submissionId/grade", async (req, res) => {
-  try {
-    const grade = await prisma.grade.findUnique({
-      where: { submissionId: Number(req.params.submissionId) },
-    });
-    res.json(grade || { message: "Not graded yet" });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/* ============================================================
-   COMMENT API
-   ============================================================ */
-
-// 18. Viết bình luận
-router.post("/comments", async (req, res) => {
-  try {
-    const { content, userId, assignmentId, submissionId } = req.body;
-
-    if (!assignmentId && !submissionId) {
-        return res.status(400).json({ error: "Comment must belong to Assignment or Submission" });
-    }
-
-    const comment = await prisma.comment.create({
-      data: {
-        content,
-        userId: Number(userId),
-        assignmentId: assignmentId ? Number(assignmentId) : null,
-        submissionId: submissionId ? Number(submissionId) : null,
-      },
-    });
-    res.status(201).json(comment);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 19. Lấy danh sách bình luận (theo assignment hoặc submission)
-router.get("/comments", async (req, res) => {
-  try {
-    const { assignmentId, submissionId } = req.query;
-    const filter = {};
-    if (assignmentId) filter.assignmentId = Number(assignmentId);
-    if (submissionId) filter.submissionId = Number(submissionId);
-
-    const comments = await prisma.comment.findMany({
-      where: filter,
-      include: {
-        user: { select: { id: true, name: true, role: true } },
-      },
-      orderBy: { createdAt: "asc" },
-    });
-    res.json(comments);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 20. Xóa bình luận
-router.delete("/comments/:id", async (req, res) => {
-    try {
-        await prisma.comment.delete({ where: { id: Number(req.params.id) } });
-        res.json({ message: "Comment deleted" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
 });
 
 export default router;
