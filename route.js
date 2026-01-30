@@ -92,6 +92,21 @@ router.post("/login", async (req, res) => {
   }
 });
 
+/* ================== PROFILE / ME API ================== */
+router.get("/me", authenticateToken, async (req, res) => {
+  try {
+    const userId = Number(req.user.id);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
+    });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /* ================== UPLOAD API ================== */
 router.post("/upload", authenticateToken, upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });

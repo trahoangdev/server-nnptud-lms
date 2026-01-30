@@ -46,16 +46,33 @@ cp .env.example .env
 - `DATABASE_URL`: Connection string của PostgreSQL.
 - `CLOUDINARY_*`: Thông tin API từ Cloudinary Dashboard.
 
-### 4. Đồng bộ Database (Prisma)
+### 4. Chuẩn bị Database (PostgreSQL)
+
+Tạo database và (tùy chọn) user trong PostgreSQL. **Xem chi tiết:** [Hướng dẫn chạy lệnh PostgreSQL](./docs/POSTGRESQL.md).
+
+Ví dụ nhanh trong `psql` (`psql -U postgres -h localhost -p 5432`):
+
+```sql
+CREATE DATABASE "server-nnptud-lms";
+```
+
+### 5. Đồng bộ Database (Prisma)
 ```bash
-# Đẩy schema lên Database
+npx prisma generate
 npx prisma db push
 
 # (Tùy chọn) Mở giao diện quản lý DB
 npx prisma studio
 ```
 
-### 5. Chạy Server
+### 6. Khởi tạo data fake (tùy chọn)
+```bash
+npm run seed
+# hoặc: npx prisma db seed
+```
+Tạo sẵn: Admin, Giáo viên, 2 Học sinh (mật khẩu: `password123`), 2 lớp, 3 bài tập, bài nộp, điểm, bình luận.
+
+### 7. Chạy Server
 ```bash
 # Chế độ phát triển
 npm run dev
