@@ -91,21 +91,46 @@ Server sẽ chạy tại: `http://localhost:3000`
 ### Upload
 - `POST /api/upload`: Upload file lên Cloudinary (form-data: `file`). Trả về `fileUrl`.
 
-### Classes
-- `POST /api/classes`: Tạo lớp mới (Teacher/Admin).
-- `GET /api/classes`: Lấy danh sách lớp (theo quyền hạn).
-- `POST /api/classes/:id/enroll`: Thêm học sinh vào lớp.
+### Classes (PRD §4.2, §5.2)
+- `POST /api/classes`: Tạo lớp (auto generate `code`).
+- `GET /api/classes`: Danh sách lớp (Teacher: lớp mình dạy; Student: lớp đã join).
+- `GET /api/classes/:id`: Chi tiết lớp (members, assignments).
+- `POST /api/classes/join`: Student join lớp bằng mã code (body: `{ code }`).
+- `POST /api/classes/:id/enroll`: Teacher/Admin thêm học sinh (body: `studentId`).
+- `PATCH /api/classes/:id`: Cập nhật tên, mô tả, status (ACTIVE/ARCHIVED).
 
-### Assignments (Bài tập)
-- `POST /api/assignments`: Tạo bài tập (Teacher).
-- `GET /api/assignments/:id`: Xem chi tiết.
+### Assignments (PRD §4.4, §5.3)
+- `POST /api/assignments`: Tạo bài tập (body: `title`, `description`, `dueDate`, `classId`, `fileUrl`, `startTime?`, `allowLate?`, `maxScore?`).
+- `GET /api/assignments/:id`: Chi tiết bài tập.
+- `GET /api/classes/:classId/assignments`: Danh sách bài tập của lớp.
 
-### Submissions (Nộp bài)
-- `POST /api/submissions`: Nộp bài (Student).
-- `GET /api/assignments/:id/submissions`: Xem danh sách bài nộp (Teacher).
+### Submissions (PRD §4.5, §5.4)
+- `POST /api/submissions`: Nộp/ cập nhật bài (Student; unique theo assignment + student; kiểm tra deadline & allowLate).
+- `GET /api/assignments/:assignmentId/submissions`: Danh sách bài nộp (Teacher: tất cả; Student: chỉ của mình).
 
-### Grades (Điểm)
-- `POST /api/grades`: Chấm điểm (Teacher).
+### Grades & Comments (PRD §4.6, §4.7)
+- `POST /api/grades`: Chấm điểm (body: `submissionId`, `score`; score 0–maxScore).
+- `POST /api/comments`: Tạo comment (body: `content`, `assignmentId?`, `submissionId?`).
+- `GET /api/comments`: Lấy comment (query: `assignmentId`, `submissionId`).
+
+### Admin (PRD §3.1, §7)
+- `GET /api/admin/users`: Danh sách user (query: `role`, `status`).
+- `POST /api/admin/users`: Tạo Teacher/Student (body: `name`, `email`, `password`, `role`).
+- `PATCH /api/admin/users/:id`: Cập nhật status (ACTIVE/INACTIVE).
+- `GET /api/admin/classes`: Danh sách lớp (Admin).
+
+### Realtime (Socket.io – PRD §6)
+Client gửi `join_room` với `{ userId, role, classId?, assignmentId?, submissionId? }` để join các room. Events:
+- **Teacher**: `submission:new`, `submission:updated`, `grade:updated`.
+- **Student**: `grade:updated`, `comment:new`.
+
+## 🔄 Migration từ schema cũ
+Schema đã chuyển sang **ClassMember** (bảng riêng), **User.status**, **Class.code** & **status**, **Assignment.allowLate/maxScore**, **Submission.status** (NOT_SUBMITTED | SUBMITTED | LATE_SUBMITTED). Nếu đã có DB cũ:
+```bash
+npx prisma migrate dev --name prd_schema
+# hoặc reset: npx prisma db push --force-reset
+npm run seed
+```
 
 ## 👨‍💻 Author
 Team NNPTUD

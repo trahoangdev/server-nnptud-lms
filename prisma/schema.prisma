@@ -1,5 +1,4 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Prisma schema - bám PRD §4 Entities & Data model
 
 generator client {
   provider = "prisma-client-js"
@@ -16,61 +15,91 @@ enum Role {
   STUDENT
 }
 
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ClassStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum ClassMemberStatus {
+  ACTIVE
+  LEFT
+}
+
 enum SubmissionStatus {
+  NOT_SUBMITTED
   SUBMITTED
-  LATE
+  LATE_SUBMITTED
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
+  id        Int        @id @default(autoincrement())
   name      String
-  email     String   @unique
+  email     String     @unique
   password  String
-  role      Role     @default(STUDENT)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  role      Role       @default(STUDENT)
+  status    UserStatus @default(ACTIVE)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
-  // Quan hệ
-  teachingClasses Class[] @relation("TeacherClasses")
-  enrolledClasses Class[] @relation("StudentClasses")
-  
-  createdAssignments Assignment[] // Teacher creates assignments
-  submissions        Submission[] // Student submits work
-  givenGrades        Grade[]      // Teacher grades submissions
+  teachingClasses  Class[]       @relation("TeacherClasses")
+  classMemberships  ClassMember[]
+  createdAssignments Assignment[]
+  submissions        Submission[]
+  givenGrades        Grade[]
   comments           Comment[]
 }
 
 model Class {
-  id          Int      @id @default(autoincrement())
+  id          Int         @id @default(autoincrement())
   name        String
+  code        String      @unique // Mã để student join, auto generate
   description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  status      ClassStatus @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
-  // Foreign Key: Teacher
   teacherId Int
   teacher   User @relation("TeacherClasses", fields: [teacherId], references: [id])
 
-  // Quan hệ: Students (Implicit Many-to-Many)
-  students User[] @relation("StudentClasses")
+  members      ClassMember[]
+  assignments  Assignment[]
+}
 
-  assignments Assignment[]
+model ClassMember {
+  id        Int              @id @default(autoincrement())
+  classId  Int
+  userId   Int
+  joinedAt DateTime         @default(now())
+  status   ClassMemberStatus @default(ACTIVE)
+
+  class Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, userId])
+  @@index([userId])
+  @@index([classId])
 }
 
 model Assignment {
   id          Int       @id @default(autoincrement())
   title       String
   description String?
-  fileUrl     String?  // File đề bài
+  fileUrl     String?   // attachment_url - file đề bài
+  startTime   DateTime? // optional - chỉ hiện sau thời điểm đó
   dueDate     DateTime?
+  allowLate   Boolean   @default(false)
+  maxScore    Int       @default(10)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  // Foreign Key: Class
   classId Int
-  class   Class @relation(fields: [classId], references: [id])
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
 
-  // Foreign Key: Creator (Teacher)
   createdById Int?
   createdBy   User? @relation(fields: [createdById], references: [id])
 
@@ -79,22 +108,25 @@ model Assignment {
 }
 
 model Submission {
-  id          Int              @id @default(autoincrement())
-  content     String?
-  fileUrl     String?
-  submittedAt DateTime         @default(now())
-  status      SubmissionStatus @default(SUBMITTED)
+  id            Int              @id @default(autoincrement())
+  content       String?
+  fileUrl       String?
+  submittedAt   DateTime         @default(now())
+  lastUpdatedAt DateTime?
+  status        SubmissionStatus @default(NOT_SUBMITTED)
 
-  // Foreign Key: Assignment
   assignmentId Int
-  assignment   Assignment @relation(fields: [assignmentId], references: [id])
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
 
-  // Foreign Key: Student
   studentId Int
-  student   User @relation(fields: [studentId], references: [id])
+  student   User @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   grade    Grade?
   comments Comment[]
+
+  @@unique([assignmentId, studentId])
+  @@index([assignmentId])
+  @@index([studentId])
 }
 
 model Grade {
@@ -102,11 +134,9 @@ model Grade {
   score    Float
   gradedAt DateTime @default(now())
 
-  // Foreign Key: Submission
   submissionId Int        @unique
-  submission   Submission @relation(fields: [submissionId], references: [id])
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
 
-  // Foreign Key: Grader (Teacher)
   gradedById Int?
   gradedBy   User? @relation(fields: [gradedById], references: [id])
 }
@@ -116,14 +146,12 @@ model Comment {
   content   String
   createdAt DateTime @default(now())
 
-  // Foreign Key: User
   userId Int
-  user   User @relation(fields: [userId], references: [id])
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Optional: Comment on Assignment OR Submission
   assignmentId Int?
-  assignment   Assignment? @relation(fields: [assignmentId], references: [id])
+  assignment   Assignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
 
   submissionId Int?
-  submission   Submission? @relation(fields: [submissionId], references: [id])
+  submission   Submission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
 }
