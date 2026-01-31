@@ -844,8 +844,11 @@ router.patch("/admin/users/:id", authenticateToken, authorizeRole(["ADMIN"]), as
 
 router.get("/admin/classes", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
+    const { status } = req.query;
+    const where = {};
+    if (status && ["ACTIVE", "ARCHIVED"].includes(String(status))) where.status = status;
     const classes = await prisma.class.findMany({
-      where: { status: "ACTIVE" },
+      where,
       include: {
         teacher: { select: { id: true, name: true, email: true } },
         _count: { select: { members: true, assignments: true } },
@@ -853,6 +856,30 @@ router.get("/admin/classes", authenticateToken, authorizeRole(["ADMIN"]), async 
       orderBy: { updatedAt: "desc" },
     });
     res.json(classes);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Admin stats for dashboard/reports */
+router.get("/admin/stats", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const [totalUsers, totalTeachers, totalStudents, totalClasses, totalAssignments, activeUsers] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { role: "TEACHER" } }),
+      prisma.user.count({ where: { role: "STUDENT" } }),
+      prisma.class.count(),
+      prisma.assignment.count(),
+      prisma.user.count({ where: { status: "ACTIVE" } }),
+    ]);
+    res.json({
+      totalUsers,
+      totalTeachers,
+      totalStudents,
+      totalClasses,
+      totalAssignments,
+      activeUsers,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
