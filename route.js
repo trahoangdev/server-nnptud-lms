@@ -8,6 +8,7 @@ import { CloudinaryStorage } from "multer-storage-cloudinary";
 import prisma from "./db.js";
 import dotenv from "dotenv";
 import { getIO } from "./socket.js";
+import { authenticateToken, authorizeRole } from "./middleware/auth.js";
 
 dotenv.config();
 
@@ -61,27 +62,7 @@ const storage = new CloudinaryStorage({
 
 const upload = multer({ storage });
 
-/* ================== MIDDLEWARE ================== */
-
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Access Token Required" });
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid Token" });
-    req.user = user;
-    next();
-  });
-};
-
-const authorizeRole = (roles) => {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: "Access Denied: You do not have permission" });
-    }
-    next();
-  };
-};
+/* ================== ROLE / ACCESS HELPERS (dùng sau middleware auth) ================== */
 
 /** Teacher: class must be owned by req.user. Student: must be member. Admin: allow. */
 async function checkClassAccess(req, classId, needOwner = false) {
@@ -125,13 +106,19 @@ router.post("/register", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(400).json({ error: "User not found" });
-    if (user.status !== "ACTIVE") return res.status(403).json({ error: "Account is inactive" });
+    const { email, password } = req.body || {};
+    if (!email || typeof email !== "string" || !email.trim()) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "Password is required" });
+    }
+    const user = await prisma.user.findUnique({ where: { email: email.trim() } });
+    if (!user) return res.status(400).json({ error: "Email hoặc mật khẩu không đúng" });
+    if (user.status && user.status !== "ACTIVE") return res.status(403).json({ error: "Tài khoản đã bị khóa" });
 
     const validPass = await bcrypt.compare(password, user.password);
-    if (!validPass) return res.status(400).json({ error: "Invalid password" });
+    if (!validPass) return res.status(400).json({ error: "Email hoặc mật khẩu không đúng" });
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, name: user.name },
@@ -278,7 +265,7 @@ router.post("/classes/join", authenticateToken, authorizeRole(["STUDENT"]), asyn
   }
 });
 
-router.post("/classes/:id/enroll", authenticateToken, async (req, res) => {
+router.post("/classes/:id/enroll", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
     let studentId = req.user.id;
     if (req.user.role === "TEACHER" || req.user.role === "ADMIN") {
@@ -318,6 +305,19 @@ router.patch("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN
       data,
     });
     res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
+  try {
+    const access = await checkClassAccess(req, req.params.id);
+    if (!access.ok) return res.status(access.status).json({ error: access.message });
+    await prisma.class.delete({
+      where: { id: Number(req.params.id) },
+    });
+    res.json({ message: "Class deleted" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -374,6 +374,39 @@ router.get("/assignments/:id", authenticateToken, async (req, res) => {
   }
 });
 
+router.patch("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.id);
+    const assignment = await prisma.assignment.findUnique({
+      where: { id: assignmentId },
+      include: { class: true },
+    });
+    if (!assignment) return res.status(404).json({ error: "Assignment not found" });
+
+    const access = await checkClassAccess(req, assignment.classId);
+    if (!access.ok) return res.status(access.status).json({ error: access.message });
+
+    const { title, description, dueDate, fileUrl, startTime, allowLate, maxScore } = req.body;
+    const data = {};
+    if (title !== undefined) data.title = title;
+    if (description !== undefined) data.description = description || null;
+    if (dueDate !== undefined) data.dueDate = dueDate ? new Date(dueDate) : null;
+    if (fileUrl !== undefined) data.fileUrl = fileUrl || null;
+    if (startTime !== undefined) data.startTime = startTime ? new Date(startTime) : null;
+    if (allowLate !== undefined) data.allowLate = allowLate === true;
+    if (maxScore !== undefined) data.maxScore = Math.max(0, parseInt(maxScore, 10) || 10);
+
+    const updated = await prisma.assignment.update({
+      where: { id: assignmentId },
+      data,
+      include: { class: { select: { id: true, name: true } } },
+    });
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get("/classes/:classId/assignments", authenticateToken, async (req, res) => {
   try {
     const access = await checkClassAccess(req, req.params.classId);
@@ -385,6 +418,96 @@ router.get("/classes/:classId/assignments", authenticateToken, async (req, res) 
       orderBy: { dueDate: "asc" },
     });
     res.json(assignments);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.id);
+    const assignment = await prisma.assignment.findUnique({
+      where: { id: assignmentId },
+      include: { class: true },
+    });
+    if (!assignment) return res.status(404).json({ error: "Assignment not found" });
+    const access = await checkClassAccess(req, assignment.classId);
+    if (!access.ok) return res.status(access.status).json({ error: access.message });
+    await prisma.assignment.delete({
+      where: { id: assignmentId },
+    });
+    res.json({ message: "Assignment deleted" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Student: all my assignments (from enrolled classes) with my submission status */
+router.get("/student/assignments", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
+  try {
+    const memberships = await prisma.classMember.findMany({
+      where: { userId: req.user.id, status: "ACTIVE" },
+      select: { classId: true },
+    });
+    const classIds = memberships.map((m) => m.classId);
+    if (classIds.length === 0) return res.json([]);
+
+    const assignments = await prisma.assignment.findMany({
+      where: { classId: { in: classIds } },
+      include: {
+        class: { select: { id: true, name: true } },
+      },
+      orderBy: { dueDate: "asc" },
+    });
+
+    const submissionMap = {};
+    const subs = await prisma.submission.findMany({
+      where: {
+        assignmentId: { in: assignments.map((a) => a.id) },
+        studentId: req.user.id,
+      },
+      include: { grade: true },
+    });
+    subs.forEach((s) => {
+      submissionMap[s.assignmentId] = s;
+    });
+
+    const result = assignments.map((a) => {
+      const sub = submissionMap[a.id];
+      return {
+        assignment: {
+          id: a.id,
+          title: a.title,
+          description: a.description,
+          fileUrl: a.fileUrl,
+          dueDate: a.dueDate,
+          allowLate: a.allowLate,
+          maxScore: a.maxScore ?? 10,
+          classId: a.classId,
+        },
+        class: a.class,
+        mySubmission: sub
+          ? {
+              id: sub.id,
+              assignmentId: sub.assignmentId,
+              studentId: sub.studentId,
+              fileUrl: sub.fileUrl,
+              content: sub.content,
+              submittedAt: sub.submittedAt,
+              lastUpdatedAt: sub.lastUpdatedAt,
+              status: sub.status,
+              grade: sub.grade
+                ? {
+                    id: sub.grade.id,
+                    score: Number(sub.grade.score),
+                    gradedAt: sub.grade.gradedAt instanceof Date ? sub.grade.gradedAt.toISOString() : sub.grade.gradedAt,
+                  }
+                : null,
+            }
+          : null,
+      };
+    });
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -599,6 +722,64 @@ router.get("/comments", authenticateToken, async (req, res) => {
       orderBy: { createdAt: "asc" },
     });
     res.json(comments);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Update comment: author or teacher of assignment's class or admin */
+router.patch("/comments/:id", authenticateToken, async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const comment = await prisma.comment.findUnique({
+      where: { id: commentId },
+      include: {
+        assignment: { select: { classId: true, class: { select: { teacherId: true } } } },
+        submission: { select: { assignmentId: true, assignment: { select: { classId: true, class: { select: { teacherId: true } } } } } },
+      },
+    });
+    if (!comment) return res.status(404).json({ error: "Comment not found" });
+    const isAuthor = comment.userId === req.user.id;
+    const teacherId = comment.assignment?.class?.teacherId ?? comment.submission?.assignment?.class?.teacherId;
+    const isTeacher = teacherId === req.user.id;
+    if (!isAuthor && !isTeacher && req.user.role !== "ADMIN") {
+      return res.status(403).json({ error: "You can only edit your own comment or be the teacher" });
+    }
+    const { content } = req.body;
+    if (typeof content !== "string" || !content.trim()) return res.status(400).json({ error: "content required" });
+    const updated = await prisma.comment.update({
+      where: { id: commentId },
+      data: { content: content.trim() },
+      include: { user: { select: { id: true, name: true, role: true } } },
+    });
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Delete comment: author or teacher of assignment's class or admin */
+router.delete("/comments/:id", authenticateToken, async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const comment = await prisma.comment.findUnique({
+      where: { id: commentId },
+      include: {
+        assignment: { select: { classId: true, class: { select: { teacherId: true } } } },
+        submission: { select: { assignmentId: true, assignment: { select: { classId: true, class: { select: { teacherId: true } } } } } },
+      },
+    });
+    if (!comment) return res.status(404).json({ error: "Comment not found" });
+    const isAuthor = comment.userId === req.user.id;
+    const teacherId = comment.assignment?.class?.teacherId ?? comment.submission?.assignment?.class?.teacherId;
+    const isTeacher = teacherId === req.user.id;
+    if (!isAuthor && !isTeacher && req.user.role !== "ADMIN") {
+      return res.status(403).json({ error: "You can only delete your own comment or be the teacher" });
+    }
+    await prisma.comment.delete({
+      where: { id: commentId },
+    });
+    res.json({ message: "Comment deleted" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
