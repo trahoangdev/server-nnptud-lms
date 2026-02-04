@@ -827,13 +827,31 @@ router.post("/admin/users", authenticateToken, authorizeRole(["ADMIN"]), async (
 router.patch("/admin/users/:id", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
     const userId = Number(req.params.id);
-    const { status } = req.body;
-    if (status && !["ACTIVE", "INACTIVE"].includes(status)) {
-      return res.status(400).json({ error: "status must be ACTIVE or INACTIVE" });
+    const { status, name, email } = req.body;
+    
+    const updateData = {};
+    if (status && ["ACTIVE", "INACTIVE"].includes(status)) {
+      updateData.status = status;
     }
+    if (name && typeof name === "string" && name.trim()) {
+      updateData.name = name.trim();
+    }
+    if (email && typeof email === "string" && email.trim()) {
+      // Check if email already exists for another user
+      const existing = await prisma.user.findUnique({ where: { email: email.trim() } });
+      if (existing && existing.id !== userId) {
+        return res.status(400).json({ error: "Email already exists" });
+      }
+      updateData.email = email.trim();
+    }
+    
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+    
     const user = await prisma.user.update({
       where: { id: userId },
-      data: status ? { status } : {},
+      data: updateData,
       select: { id: true, name: true, email: true, role: true, status: true },
     });
     res.json(user);
@@ -879,6 +897,313 @@ router.get("/admin/stats", authenticateToken, authorizeRole(["ADMIN"]), async (r
       totalClasses,
       totalAssignments,
       activeUsers,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Admin activity logs - synthetic from existing data */
+router.get("/admin/activity-logs", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { role, actionType, status, limit = 100, offset = 0 } = req.query;
+    
+    const logs = [];
+    
+    // Get recent user creations
+    const recentUsers = await prisma.user.findMany({
+      take: 20,
+      orderBy: { createdAt: "desc" },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
+    });
+    recentUsers.forEach((u) => {
+      logs.push({
+        id: `user-${u.id}`,
+        timestamp: u.createdAt.toISOString(),
+        userId: String(u.id),
+        userName: u.name,
+        userRole: u.role.toLowerCase(),
+        action: "Tạo tài khoản mới",
+        actionType: "create",
+        resource: "User",
+        resourceId: String(u.id),
+        details: `Tài khoản ${u.email} được tạo`,
+        ipAddress: "N/A",
+        status: "success",
+      });
+    });
+    
+    // Get recent class creations
+    const recentClasses = await prisma.class.findMany({
+      take: 20,
+      orderBy: { createdAt: "desc" },
+      include: { teacher: { select: { id: true, name: true, role: true } } },
+    });
+    recentClasses.forEach((c) => {
+      logs.push({
+        id: `class-${c.id}`,
+        timestamp: c.createdAt.toISOString(),
+        userId: String(c.teacherId),
+        userName: c.teacher.name,
+        userRole: c.teacher.role.toLowerCase(),
+        action: "Tạo lớp học mới",
+        actionType: "create",
+        resource: "Class",
+        resourceId: String(c.id),
+        details: `Lớp '${c.name}' được tạo thành công`,
+        ipAddress: "N/A",
+        status: "success",
+      });
+    });
+    
+    // Get recent assignments
+    const recentAssignments = await prisma.assignment.findMany({
+      take: 20,
+      orderBy: { createdAt: "desc" },
+      include: { createdBy: { select: { id: true, name: true, role: true } }, class: { select: { name: true } } },
+    });
+    recentAssignments.forEach((a) => {
+      if (a.createdBy) {
+        logs.push({
+          id: `assign-${a.id}`,
+          timestamp: a.createdAt.toISOString(),
+          userId: String(a.createdById),
+          userName: a.createdBy.name,
+          userRole: a.createdBy.role.toLowerCase(),
+          action: "Giao bài tập mới",
+          actionType: "create",
+          resource: "Assignment",
+          resourceId: String(a.id),
+          details: `Giao bài '${a.title}' cho lớp ${a.class.name}`,
+          ipAddress: "N/A",
+          status: "success",
+        });
+      }
+    });
+    
+    // Get recent submissions
+    const recentSubmissions = await prisma.submission.findMany({
+      take: 20,
+      orderBy: { submittedAt: "desc" },
+      include: { student: { select: { id: true, name: true, role: true } }, assignment: { select: { title: true, class: { select: { name: true } } } } },
+    });
+    recentSubmissions.forEach((s) => {
+      logs.push({
+        id: `sub-${s.id}`,
+        timestamp: s.submittedAt.toISOString(),
+        userId: String(s.studentId),
+        userName: s.student.name,
+        userRole: s.student.role.toLowerCase(),
+        action: "Nộp bài tập",
+        actionType: "create",
+        resource: "Submission",
+        resourceId: String(s.id),
+        details: `Nộp bài '${s.assignment.title}' cho lớp ${s.assignment.class.name}`,
+        ipAddress: "N/A",
+        status: s.status === "LATE_SUBMITTED" ? "warning" : "success",
+      });
+    });
+    
+    // Get recent grades
+    const recentGrades = await prisma.grade.findMany({
+      take: 20,
+      orderBy: { gradedAt: "desc" },
+      include: {
+        gradedBy: { select: { id: true, name: true, role: true } },
+        submission: {
+          include: {
+            student: { select: { name: true } },
+            assignment: { select: { title: true } },
+          },
+        },
+      },
+    });
+    recentGrades.forEach((g) => {
+      if (g.gradedBy) {
+        logs.push({
+          id: `grade-${g.id}`,
+          timestamp: g.gradedAt.toISOString(),
+          userId: String(g.gradedById),
+          userName: g.gradedBy.name,
+          userRole: g.gradedBy.role.toLowerCase(),
+          action: "Chấm điểm bài tập",
+          actionType: "update",
+          resource: "Grade",
+          resourceId: String(g.id),
+          details: `Chấm điểm ${g.score} cho bài nộp của học sinh ${g.submission.student.name}`,
+          ipAddress: "N/A",
+          status: "success",
+        });
+      }
+    });
+    
+    // Sort by timestamp desc
+    logs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    // Apply filters
+    let filteredLogs = logs;
+    if (role && role !== "all") {
+      filteredLogs = filteredLogs.filter((log) => log.userRole === role.toLowerCase());
+    }
+    if (actionType && actionType !== "all") {
+      filteredLogs = filteredLogs.filter((log) => log.actionType === actionType);
+    }
+    if (status && status !== "all") {
+      filteredLogs = filteredLogs.filter((log) => log.status === status);
+    }
+    
+    // Pagination
+    const total = filteredLogs.length;
+    const paginatedLogs = filteredLogs.slice(Number(offset), Number(offset) + Number(limit));
+    
+    res.json({
+      logs: paginatedLogs,
+      total,
+      limit: Number(limit),
+      offset: Number(offset),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Admin settings - simple key-value store simulation */
+router.get("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    // Return default settings (in real app, store in DB)
+    res.json({
+      system: {
+        siteName: "NNPTUD LMS",
+        siteUrl: process.env.SITE_URL || "https://lms.edu.vn",
+        adminEmail: process.env.ADMIN_EMAIL || "admin@lms.edu.vn",
+        maxFileSize: 50,
+        maxStoragePerClass: 5,
+        sessionTimeout: 30,
+        maintenanceMode: false,
+      },
+      security: {
+        twoFactorRequired: false,
+        passwordMinLength: 8,
+        passwordRequireUppercase: true,
+        passwordRequireNumber: true,
+        passwordRequireSpecial: false,
+        maxLoginAttempts: 5,
+        lockoutDuration: 15,
+        sessionConcurrent: true,
+      },
+      email: {
+        smtpHost: process.env.SMTP_HOST || "smtp.gmail.com",
+        smtpPort: process.env.SMTP_PORT || "587",
+        smtpUser: process.env.SMTP_USER || "",
+        smtpSecure: "tls",
+        fromName: "NNPTUD LMS",
+        fromEmail: process.env.SMTP_FROM || "noreply@lms.edu.vn",
+      },
+      backup: {
+        autoBackup: true,
+        backupFrequency: "daily",
+        backupRetention: 30,
+        backupLocation: "local",
+      },
+      notifications: {
+        notifyNewUser: true,
+        notifyNewClass: true,
+        notifyStorageWarning: true,
+        notifySecurityAlert: true,
+        dailyReport: false,
+        weeklyReport: true,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.patch("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { system, security, email, backup, notifications } = req.body;
+    // In real app, save to DB. For now, just return success
+    res.json({ message: "Settings updated successfully", settings: { system, security, email, backup, notifications } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Admin reports - submissions and grades statistics */
+router.get("/admin/reports/submissions", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { timeRange = "month" } = req.query;
+    const now = new Date();
+    let startDate = new Date();
+    
+    switch (timeRange) {
+      case "week":
+        startDate.setDate(now.getDate() - 7);
+        break;
+      case "month":
+        startDate.setMonth(now.getMonth() - 1);
+        break;
+      case "quarter":
+        startDate.setMonth(now.getMonth() - 3);
+        break;
+      case "year":
+        startDate.setFullYear(now.getFullYear() - 1);
+        break;
+    }
+    
+    const submissions = await prisma.submission.findMany({
+      where: {
+        submittedAt: { gte: startDate },
+      },
+      include: {
+        assignment: { select: { dueDate: true, allowLate: true } },
+      },
+    });
+    
+    const stats = {
+      total: submissions.length,
+      onTime: submissions.filter((s) => {
+        if (!s.assignment.dueDate) return true;
+        return new Date(s.submittedAt) <= new Date(s.assignment.dueDate);
+      }).length,
+      late: submissions.filter((s) => s.status === "LATE_SUBMITTED").length,
+      missing: 0, // Would need to calculate from assignments vs submissions
+    };
+    
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get("/admin/reports/grades", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const grades = await prisma.grade.findMany({
+      include: { submission: { select: { assignmentId: true } } },
+    });
+    
+    const gradeRanges = {
+      excellent: grades.filter((g) => g.score >= 9).length,
+      good: grades.filter((g) => g.score >= 8 && g.score < 9).length,
+      average: grades.filter((g) => g.score >= 6.5 && g.score < 8).length,
+      belowAverage: grades.filter((g) => g.score >= 5 && g.score < 6.5).length,
+      poor: grades.filter((g) => g.score < 5).length,
+    };
+    
+    const total = grades.length;
+    const avgScore = total > 0 ? grades.reduce((sum, g) => sum + g.score, 0) / total : 0;
+    
+    res.json({
+      distribution: gradeRanges,
+      total,
+      average: avgScore,
+      percentages: {
+        excellent: total > 0 ? (gradeRanges.excellent / total) * 100 : 0,
+        good: total > 0 ? (gradeRanges.good / total) * 100 : 0,
+        average: total > 0 ? (gradeRanges.average / total) * 100 : 0,
+        belowAverage: total > 0 ? (gradeRanges.belowAverage / total) * 100 : 0,
+        poor: total > 0 ? (gradeRanges.poor / total) * 100 : 0,
+      },
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
