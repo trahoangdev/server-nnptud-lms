@@ -1,136 +1,374 @@
-# NNPTUD LMS Server
+# 🎓 NNPTUD LMS Server
 
-Backend Server cho hệ thống Quản lý học tập (LMS), hỗ trợ Giáo viên quản lý lớp học, giao bài tập và Học sinh nộp bài.
+> Backend Server cho hệ thống **Quản lý học tập (LMS)** – Hỗ trợ Giáo viên quản lý lớp học, giao bài tập, chấm điểm và Học sinh nộp bài, xem điểm theo thời gian thực.
+
+---
 
 ## 🚀 Tính năng
 
-- **Authentication**: Đăng ký/Đăng nhập (JWT), mã hóa mật khẩu.
-- **Phân quyền (RBAC)**: 
-  - **Admin/Teacher**: Quản lý lớp, tạo bài tập, chấm điểm.
-  - **Student**: Xem lớp, nộp bài, xem điểm.
-- **Quản lý Lớp học**: Tạo lớp, thêm học sinh.
-- **Bài tập & Nộp bài**: 
-  - Upload file đề bài (Teacher).
-  - Upload bài làm (Student) hỗ trợ: PDF, DOCX, ZIP, Image...
-  - Lưu trữ file trên **Cloudinary**.
-- **Chấm điểm & Bình luận**: Giáo viên chấm điểm, hai bên trao đổi qua bình luận.
+| Module | Mô tả |
+|--------|-------|
+| 🔐 **Authentication** | Đăng ký / Đăng nhập JWT, mã hóa mật khẩu bcrypt |
+| 👥 **Phân quyền RBAC** | Admin · Teacher · Student – middleware kiểm tra role |
+| 🏫 **Quản lý Lớp học** | Tạo lớp (auto-gen code), join bằng mã, enroll student |
+| 📝 **Bài tập** | CRUD bài tập, hỗ trợ deadline, cho phép nộp trễ |
+| 📤 **Nộp bài** | Upload file (PDF, DOCX, ZIP, Image...) lên Cloudinary |
+| ✅ **Chấm điểm** | Teacher chấm điểm, upsert, realtime cập nhật |
+| 💬 **Bình luận** | Comment 2 chiều Teacher ↔ Student trên submission |
+| ⚡ **Realtime** | Socket.io – thông báo tức thì (nộp bài, chấm điểm, comment) |
+| 🛡️ **Admin Panel** | Quản lý users, classes, thống kê, activity logs |
+
+---
 
 ## 🛠 Công nghệ sử dụng
 
-- **Runtime**: Node.js
-- **Framework**: Express.js
-- **Database**: PostgreSQL
-- **ORM**: Prisma
-- **Storage**: Cloudinary (File Upload)
-- **Auth**: JWT & Bcrypt
+| Layer | Công nghệ | Phiên bản |
+|-------|-----------|:---------:|
+| Runtime | Node.js | 18+ |
+| Framework | Express.js | 4.21 |
+| Database | PostgreSQL | 15 (Docker) |
+| ORM | Prisma | 5.10 |
+| Realtime | Socket.io | 4.8 |
+| File Storage | Cloudinary | 2.5 |
+| Auth | JWT + Bcrypt | – |
+| Dev Tools | Nodemon | 3.1 |
+
+---
 
 ## 📦 Cài đặt & Chạy dự án
 
-### 1. Clone dự án
+### Yêu cầu
+- **Node.js** v18+
+- **Docker Desktop** (cho PostgreSQL)
+- **npm** v9+
+
+### 1. Clone & cài đặt
+
 ```bash
 git clone https://github.com/trahoangdev/server-nnptud-lms.git
 cd server-nnptud-lms
-```
-
-### 2. Cài đặt dependencies
-```bash
 npm install
 ```
 
-### 3. Cấu hình biến môi trường
-Tạo file `.env` từ file mẫu:
+### 2. Cấu hình biến môi trường
+
 ```bash
 cp .env.example .env
 ```
-Điền các thông tin sau vào `.env`:
-- `DATABASE_URL`: Connection string của PostgreSQL.
-- `CLOUDINARY_*`: Thông tin API từ Cloudinary Dashboard.
 
-### 4. Chuẩn bị Database (PostgreSQL)
+Điền các thông tin trong `.env`:
 
-Tạo database và (tùy chọn) user trong PostgreSQL. **Xem chi tiết:** [Hướng dẫn chạy lệnh PostgreSQL](./docs/POSTGRESQL.md).
+| Biến | Mô tả | Giá trị mặc định |
+|------|-------|------------------|
+| `PORT` | Port server | `3000` |
+| `DATABASE_URL` | Connection string PostgreSQL | `postgresql://postgres:190704@localhost:5434/server-nnptud-lms?schema=public` |
+| `JWT_SECRET` | Secret key cho JWT | (tự đặt) |
+| `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name | (từ Cloudinary Dashboard) |
+| `CLOUDINARY_API_KEY` | Cloudinary API key | (từ Cloudinary Dashboard) |
+| `CLOUDINARY_API_SECRET` | Cloudinary API secret | (từ Cloudinary Dashboard) |
 
-Ví dụ nhanh trong `psql` (`psql -U postgres -h localhost -p 5432`):
+### 3. Khởi động Database (Docker) 🐳
 
-```sql
-CREATE DATABASE "server-nnptud-lms";
+PostgreSQL chạy trong Docker container, **không cần cài PostgreSQL trên máy**.
+
+```bash
+# Khởi động PostgreSQL + pgAdmin
+docker compose up -d
+
+# Kiểm tra trạng thái
+docker compose ps
 ```
 
-### 5. Đồng bộ Database (Prisma)
+| Service | Container | Port | Mô tả |
+|---------|-----------|:----:|-------|
+| **PostgreSQL 15** | `lms-postgres` | `5434` | Database chính |
+| **pgAdmin** | `lms-pgadmin` | `5050` | GUI quản lý DB (tùy chọn) |
+
+**Truy cập pgAdmin:** http://localhost:5050
+- Email: `admin@nnptud.edu.vn`
+- Password: `admin123`
+
+**Kết nối DB trong pgAdmin:**
+- Host: `postgres` (hoặc `host.docker.internal`)
+- Port: `5432`
+- User: `postgres`
+- Password: `190704`
+
+<details>
+<summary>📋 Các lệnh Docker thường dùng</summary>
+
 ```bash
+# Start database
+docker compose up -d
+
+# Stop (giữ data)
+docker compose down
+
+# Stop + xóa toàn bộ data
+docker compose down -v
+
+# Xem logs PostgreSQL
+docker compose logs -f postgres
+
+# Truy cập psql trong container
+docker compose exec postgres psql -U postgres -d server-nnptud-lms
+```
+
+</details>
+
+### 4. Đồng bộ Schema (Prisma)
+
+```bash
+# Generate Prisma Client
 npx prisma generate
+
+# Push schema lên database
 npx prisma db push
 
-# (Tùy chọn) Mở giao diện quản lý DB
+# (Tùy chọn) Mở Prisma Studio – GUI quản lý DB
 npx prisma studio
 ```
 
-### 6. Khởi tạo data fake (tùy chọn)
+### 5. Khởi tạo dữ liệu mẫu
+
 ```bash
 npm run seed
-# hoặc: npx prisma db seed
 ```
-Tạo sẵn: Admin, Giáo viên, 2 Học sinh (mật khẩu: `password123`), 2 lớp, 3 bài tập, bài nộp, điểm, bình luận.
 
-### 7. Chạy Server
+**Dữ liệu seed bao gồm:**
+
+| Loại | Chi tiết | Mật khẩu |
+|------|---------|:---------:|
+| 👤 Admin | admin@nnptud.edu.vn | `password123` |
+| 👨‍🏫 Teacher | teacher@nnptud.edu.vn | `password123` |
+| 👨‍🎓 Student 1 | student@nnptud.edu.vn | `password123` |
+| 👨‍🎓 Student 2 | student2@nnptud.edu.vn | `password123` |
+| 🏫 2 Lớp | "Toán cao cấp 1", "Lập trình Web" | – |
+| 📝 3 Bài tập | Chương 1, Chương 2, Đồ án giữa kỳ | – |
+| 📤 3 Bài nộp | 2 SUBMITTED, 1 LATE | – |
+| ✅ 2 Điểm | 8.5 và 9.0 | – |
+| 💬 2 Comment | Bình luận mẫu | – |
+
+### 6. Chạy Server
+
 ```bash
-# Chế độ phát triển
+# Development (auto-reload)
 npm run dev
 
-# Chế độ production
+# Production
 npm start
 ```
-Server sẽ chạy tại: `http://localhost:3000`
 
-## 📚 API Documentation
+> 🌐 Server chạy tại: **http://localhost:3000**
 
-### Auth
-- `POST /api/register`: Đăng ký tài khoản (body: `name`, `email`, `password`, `role`).
-- `POST /api/login`: Đăng nhập lấy Token.
+---
 
-### Upload
-- `POST /api/upload`: Upload file lên Cloudinary (form-data: `file`). Trả về `fileUrl`.
+## 📁 Cấu trúc dự án
 
-### Classes (PRD §4.2, §5.2)
-- `POST /api/classes`: Tạo lớp (auto generate `code`).
-- `GET /api/classes`: Danh sách lớp (Teacher: lớp mình dạy; Student: lớp đã join).
-- `GET /api/classes/:id`: Chi tiết lớp (members, assignments).
-- `POST /api/classes/join`: Student join lớp bằng mã code (body: `{ code }`).
-- `POST /api/classes/:id/enroll`: Teacher/Admin thêm học sinh (body: `studentId`).
-- `PATCH /api/classes/:id`: Cập nhật tên, mô tả, status (ACTIVE/ARCHIVED).
+```
+server-nnptud-lms/
+├── app.js                  # Express app + HTTP server + Socket.io
+├── db.js                   # Prisma Client singleton
+├── route.js                # Tất cả API endpoints (1214 dòng)
+├── socket.js               # Socket.io configuration
+│
+├── middleware/
+│   └── auth.js             # JWT authenticate + RBAC authorize
+│
+├── prisma/
+│   ├── schema.prisma       # Database schema (7 models, 5 enums)
+│   ├── seed.js             # Seed data
+│   └── migrations/         # Database migrations
+│
+├── docs/
+│   └── POSTGRESQL.md       # Hướng dẫn PostgreSQL
+│
+├── docker-compose.yml      # PostgreSQL + pgAdmin
+├── .env                    # Environment variables
+├── .env.example            # Template .env
+├── package.json
+└── .gitignore
+```
 
-### Assignments (PRD §4.4, §5.3)
-- `POST /api/assignments`: Tạo bài tập (body: `title`, `description`, `dueDate`, `classId`, `fileUrl`, `startTime?`, `allowLate?`, `maxScore?`).
-- `GET /api/assignments/:id`: Chi tiết bài tập.
-- `GET /api/classes/:classId/assignments`: Danh sách bài tập của lớp.
+---
 
-### Submissions (PRD §4.5, §5.4)
-- `POST /api/submissions`: Nộp/ cập nhật bài (Student; unique theo assignment + student; kiểm tra deadline & allowLate).
-- `GET /api/assignments/:assignmentId/submissions`: Danh sách bài nộp (Teacher: tất cả; Student: chỉ của mình).
+## 📊 Database Schema
 
-### Grades & Comments (PRD §4.6, §4.7)
-- `POST /api/grades`: Chấm điểm (body: `submissionId`, `score`; score 0–maxScore).
-- `POST /api/comments`: Tạo comment (body: `content`, `assignmentId?`, `submissionId?`).
-- `GET /api/comments`: Lấy comment (query: `assignmentId`, `submissionId`).
+**7 Models – 5 Enums** (chi tiết: `prisma/schema.prisma`)
 
-### Admin (PRD §3.1, §7)
-- `GET /api/admin/users`: Danh sách user (query: `role`, `status`).
-- `POST /api/admin/users`: Tạo Teacher/Student (body: `name`, `email`, `password`, `role`).
-- `PATCH /api/admin/users/:id`: Cập nhật status (ACTIVE/INACTIVE).
-- `GET /api/admin/classes`: Danh sách lớp (Admin).
+```
+User ──1:N──► Class (teacher)
+  │              │
+  │           1:N│
+  │              ▼
+  ├──1:N──► ClassMember
+  │
+  ├──1:N──► Assignment ──1:N──► Submission ──1:1──► Grade
+  │                                  │
+  ├──1:N──► Comment ◄───────────────┘
+  └──1:N──► Grade (gradedBy)
+```
 
-### Realtime (Socket.io – PRD §6)
-Client gửi `join_room` với `{ userId, role, classId?, assignmentId?, submissionId? }` để join các room. Events:
-- **Teacher**: `submission:new`, `submission:updated`, `grade:updated`.
-- **Student**: `grade:updated`, `comment:new`.
+| Model | Mô tả |
+|-------|-------|
+| `User` | Tài khoản (Admin / Teacher / Student) |
+| `Class` | Lớp học (name, code unique, teacher) |
+| `ClassMember` | Quan hệ Student ↔ Class (join/leave) |
+| `Assignment` | Bài tập (title, deadline, maxScore, allowLate) |
+| `Submission` | Bài nộp (content, file, status, deadline check) |
+| `Grade` | Điểm (score, 1:1 với Submission) |
+| `Comment` | Bình luận (trên Assignment hoặc Submission) |
 
-## 🔄 Migration từ schema cũ
-Schema đã chuyển sang **ClassMember** (bảng riêng), **User.status**, **Class.code** & **status**, **Assignment.allowLate/maxScore**, **Submission.status** (NOT_SUBMITTED | SUBMITTED | LATE_SUBMITTED). Nếu đã có DB cũ:
+---
+
+## 📚 API Endpoints
+
+> **Base URL:** `http://localhost:3000/api`
+> 
+> **Auth Header:** `Authorization: Bearer <JWT_TOKEN>`
+
+### 🔐 Auth
+
+| Method | Endpoint | Mô tả | Auth |
+|:------:|----------|-------|:----:|
+| POST | `/api/register` | Đăng ký tài khoản | ❌ |
+| POST | `/api/login` | Đăng nhập, lấy JWT token | ❌ |
+| GET | `/api/me` | Lấy thông tin profile | ✅ |
+
+### 📤 Upload
+
+| Method | Endpoint | Mô tả | Auth |
+|:------:|----------|-------|:----:|
+| POST | `/api/upload` | Upload file lên Cloudinary (form-data) | ✅ |
+
+### 🏫 Classes
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| POST | `/api/classes` | Tạo lớp (auto-gen code) | Teacher, Admin |
+| GET | `/api/classes` | Danh sách lớp (filtered by role) | All |
+| GET | `/api/classes/:id` | Chi tiết lớp + members + assignments | All |
+| PATCH | `/api/classes/:id` | Cập nhật lớp (name, description, status) | Teacher (owner), Admin |
+| DELETE | `/api/classes/:id` | Xóa lớp | Teacher (owner), Admin |
+| POST | `/api/classes/join` | Student join lớp bằng code | Student |
+| POST | `/api/classes/:id/enroll` | Teacher thêm student vào lớp | Teacher, Admin |
+
+### 📝 Assignments
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| POST | `/api/assignments` | Tạo bài tập | Teacher, Admin |
+| GET | `/api/assignments/:id` | Chi tiết bài tập | All (authorized) |
+| PATCH | `/api/assignments/:id` | Cập nhật bài tập | Teacher (owner), Admin |
+| DELETE | `/api/assignments/:id` | Xóa bài tập | Teacher (owner), Admin |
+| GET | `/api/classes/:classId/assignments` | Bài tập của lớp | All (authorized) |
+| GET | `/api/student/assignments` | Tất cả bài tập (Student) | Student |
+
+### 📤 Submissions
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| POST | `/api/submissions` | Nộp / cập nhật bài (upsert, check deadline) | Student |
+| GET | `/api/assignments/:id/submissions` | Danh sách bài nộp | Teacher: all, Student: own |
+
+### ✅ Grades
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| POST | `/api/grades` | Chấm điểm (upsert, 0–maxScore) | Teacher, Admin |
+
+### 💬 Comments
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| POST | `/api/comments` | Tạo comment | All (authorized) |
+| GET | `/api/comments` | Lấy comments (?assignmentId, ?submissionId) | All (authorized) |
+| PATCH | `/api/comments/:id` | Sửa comment | Author / Teacher / Admin |
+| DELETE | `/api/comments/:id` | Xóa comment | Author / Teacher / Admin |
+
+### 🛡️ Admin
+
+| Method | Endpoint | Mô tả | Role |
+|:------:|----------|-------|:----:|
+| GET | `/api/admin/users` | Danh sách users (?role, ?status) | Admin |
+| POST | `/api/admin/users` | Tạo user mới | Admin |
+| PATCH | `/api/admin/users/:id` | Cập nhật user (status, name, email) | Admin |
+| GET | `/api/admin/classes` | Danh sách classes | Admin |
+| GET | `/api/admin/stats` | Thống kê Dashboard | Admin |
+| GET | `/api/admin/activity-logs` | Nhật ký hoạt động | Admin |
+
+---
+
+## ⚡ Realtime (Socket.io)
+
+### Kết nối
+
+```javascript
+import { io } from "socket.io-client";
+
+const socket = io("http://localhost:3000");
+
+socket.emit("join_room", {
+  userId: 1,
+  role: "STUDENT",
+  classId: 1,           // optional
+  assignmentId: 1,      // optional
+  submissionId: 1       // optional
+});
+```
+
+### Rooms
+
+| Room | Ai join | Events nhận |
+|------|---------|-------------|
+| `user_{userId}` | Tất cả | `grade:updated`, `comment:new` |
+| `teachers` | Teacher, Admin | `submission:new` |
+| `class:{classId}` | Members & Teacher | `grade:updated` |
+| `assignment:{assignmentId}` | Đang xem assignment | `submission:new`, `submission:updated` |
+| `submission:{submissionId}` | Đang xem submission | `comment:new`, `grade:updated` |
+
+### Events
+
+| Event | Khi nào | Payload chính |
+|-------|---------|--------------|
+| `submission:new` | Student nộp bài lần đầu | `{ submission_id, student_name, assignment_title }` |
+| `submission:updated` | Student cập nhật bài nộp | `{ submission_id, status, updated_at }` |
+| `grade:updated` | Teacher chấm/sửa điểm | `{ score, assignment_title, student_id }` |
+| `comment:new` | Gửi comment mới | `{ content, author_name, submission_id }` |
+
+---
+
+## 🔄 Migration
+
 ```bash
-npx prisma migrate dev --name prd_schema
-# hoặc reset: npx prisma db push --force-reset
+# Tạo migration mới
+npx prisma migrate dev --name <tên_migration>
+
+# Áp dụng migration (production)
+npx prisma migrate deploy
+
+# Reset database (development)
+npx prisma db push --force-reset
 npm run seed
 ```
 
+---
+
+## 📖 Tài liệu chi tiết
+
+Xem thêm tại thư mục [`/docs`](../docs/):
+
+| File | Nội dung |
+|------|---------|
+| [01 – Tổng quan dự án](../docs/01-tong-quan-du-an.md) | Kiến trúc, tech stack, roadmap |
+| [03 – Backend Plan](../docs/03-backend-plan.md) | Kế hoạch refactor, API mới, security |
+| [05 – Database Design](../docs/05-database-design.md) | ERD, chi tiết models, indexes |
+| [06 – API Specification](../docs/06-api-specification.md) | Đặc tả API đầy đủ request/response |
+| [07 – Realtime Socket](../docs/07-realtime-socket.md) | Socket.io architecture, events |
+| [09 – Deployment Guide](../docs/09-deployment-guide.md) | Docker, VPS, CI/CD |
+
+---
+
 ## 👨‍💻 Author
-Team NNPTUD
+
+**Team NNPTUD** – Đề tài: Hệ thống LMS Mini
