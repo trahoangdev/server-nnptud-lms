@@ -207,6 +207,7 @@ model Conversation {
   name      String?  // null for DM / auto-generated for class
   type      String   @default("class") // "class" | "group" | "direct"
   classId   Int?     // linked class (for class conversations)
+  roomCode  String?  @unique // mã phòng để student tham gia
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

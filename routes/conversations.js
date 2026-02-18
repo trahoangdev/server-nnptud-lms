@@ -1,14 +1,20 @@
 /**
  * Conversations / Messaging routes
- * Handles: CRUD conversations, messages, mark-read, unread count
+ * Handles: CRUD conversations, messages, mark-read, unread count, join by room code
  */
 
 import express from "express";
+import crypto from "crypto";
 import { authenticateToken } from "../middleware/auth.js";
 import prisma from "../db.js";
 import { getIO } from "../socket.js";
 
 const router = express.Router();
+
+// Generate a unique 6-char uppercase room code
+function generateRoomCode() {
+  return crypto.randomBytes(3).toString("hex").toUpperCase(); // e.g. "A1B2C3"
+}
 
 // ─── GET /api/conversations — list user's conversations ───
 router.get("/conversations", authenticateToken, async (req, res) => {
@@ -75,6 +81,7 @@ router.get("/conversations", authenticateToken, async (req, res) => {
           type: conv.type,
           classId: conv.classId ? String(conv.classId) : null,
           className: conv.class?.name || "",
+          roomCode: conv.roomCode || null,
           members: users.map((u) => ({
             id: String(u.id),
             name: u.name,
@@ -180,11 +187,20 @@ router.post("/conversations", authenticateToken, async (req, res) => {
     // Remove duplicates
     finalMemberIds = [...new Set(finalMemberIds)];
 
+    // Generate unique room code
+    let roomCode = generateRoomCode();
+    let codeExists = await prisma.conversation.findUnique({ where: { roomCode } });
+    while (codeExists) {
+      roomCode = generateRoomCode();
+      codeExists = await prisma.conversation.findUnique({ where: { roomCode } });
+    }
+
     const conversation = await prisma.conversation.create({
       data: {
         name: convName,
         type: classId ? "class" : type,
         classId: classId ? Number(classId) : null,
+        roomCode,
         members: {
           create: finalMemberIds.map((id) => ({ userId: id })),
         },
@@ -195,10 +211,139 @@ router.post("/conversations", authenticateToken, async (req, res) => {
       },
     });
 
-    res.status(201).json(conversation);
+    res.status(201).json({ ...conversation, roomCode });
   } catch (err) {
     console.error("POST /conversations error:", err);
     res.status(500).json({ error: "Lỗi tạo hội thoại" });
+  }
+});
+
+// ─── POST /api/conversations/join — join a conversation by room code ───
+router.post("/conversations/join", authenticateToken, async (req, res) => {
+  try {
+    const { roomCode } = req.body;
+    const userId = req.user.id;
+
+    if (!roomCode?.trim()) {
+      return res.status(400).json({ error: "Vui lòng nhập mã phòng" });
+    }
+
+    const conversation = await prisma.conversation.findUnique({
+      where: { roomCode: roomCode.trim().toUpperCase() },
+      include: { members: true },
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: "Mã phòng không tồn tại" });
+    }
+
+    // Check if already a member
+    const existingMember = conversation.members.find((m) => m.userId === userId);
+    if (existingMember) {
+      return res.status(400).json({
+        error: "Bạn đã là thành viên của hội thoại này",
+        conversationId: conversation.id,
+      });
+    }
+
+    // Add user as member
+    await prisma.conversationMember.create({
+      data: {
+        conversationId: conversation.id,
+        userId,
+      },
+    });
+
+    res.json({
+      success: true,
+      conversationId: conversation.id,
+      conversationName: conversation.name,
+    });
+  } catch (err) {
+    console.error("POST /conversations/join error:", err);
+    res.status(500).json({ error: "Lỗi tham gia hội thoại" });
+  }
+});
+
+// ─── PATCH /api/conversations/:id — update conversation (teacher only) ───
+router.patch("/conversations/:id", authenticateToken, async (req, res) => {
+  try {
+    const conversationId = Number(req.params.id);
+    const userId = req.user.id;
+    const { name } = req.body;
+
+    // Only TEACHER / ADMIN can edit
+    if (req.user.role !== "TEACHER" && req.user.role !== "ADMIN") {
+      return res.status(403).json({ error: "Chỉ giảng viên mới có thể chỉnh sửa hội thoại" });
+    }
+
+    // Verify membership
+    const membership = await prisma.conversationMember.findUnique({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+    if (!membership) {
+      return res.status(403).json({ error: "Bạn không phải thành viên hội thoại này" });
+    }
+
+    const updated = await prisma.conversation.update({
+      where: { id: conversationId },
+      data: {
+        ...(name !== undefined ? { name: name.trim() } : {}),
+      },
+      include: {
+        members: true,
+        class: { select: { id: true, name: true } },
+      },
+    });
+
+    // Notify members via socket
+    const io = getIO();
+    io.to(`conversation:${conversationId}`).emit("conversation:updated", {
+      id: String(conversationId),
+      name: updated.name,
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("PATCH /conversations/:id error:", err);
+    res.status(500).json({ error: "Lỗi cập nhật hội thoại" });
+  }
+});
+
+// ─── DELETE /api/conversations/:id — delete conversation (teacher only) ───
+router.delete("/conversations/:id", authenticateToken, async (req, res) => {
+  try {
+    const conversationId = Number(req.params.id);
+    const userId = req.user.id;
+
+    // Only TEACHER / ADMIN can delete
+    if (req.user.role !== "TEACHER" && req.user.role !== "ADMIN") {
+      return res.status(403).json({ error: "Chỉ giảng viên mới có thể xoá hội thoại" });
+    }
+
+    // Verify membership
+    const membership = await prisma.conversationMember.findUnique({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+    if (!membership) {
+      return res.status(403).json({ error: "Bạn không phải thành viên hội thoại này" });
+    }
+
+    // Notify members before deletion
+    const io = getIO();
+    io.to(`conversation:${conversationId}`).emit("conversation:deleted", {
+      id: String(conversationId),
+    });
+
+    // Delete conversation (members + messages cascade)
+    await prisma.conversation.delete({
+      where: { id: conversationId },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /conversations/:id error:", err);
+    res.status(500).json({ error: "Lỗi xoá hội thoại" });
   }
 });
 
