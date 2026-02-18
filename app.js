@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer } from "http"; // Import HTTP Server
-import router from "./route.js";
+import router from "./routes/index.js";
 import prisma from "./db.js";
 import { initSocket } from "./socket.js"; // Import Socket config
 
