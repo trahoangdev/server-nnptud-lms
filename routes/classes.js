@@ -161,6 +161,89 @@ router.post("/classes/:id/enroll", authenticateToken, authorizeRole(["TEACHER", 
   }
 });
 
+/** Gradebook — full grade matrix for a class */
+router.get("/classes/:id/gradebook", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
+  try {
+    const classId = Number(req.params.id);
+    const access = await checkClassAccess(req, classId);
+    if (!access.ok) return res.status(access.status).json({ error: access.message });
+
+    // Get all assignments
+    const assignments = await prisma.assignment.findMany({
+      where: { classId },
+      select: { id: true, title: true, maxScore: true, dueDate: true },
+      orderBy: { createdAt: "asc" },
+    });
+
+    // Get all active members
+    const members = await prisma.classMember.findMany({
+      where: { classId, status: "ACTIVE" },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+
+    // Get all submissions for these assignments
+    const assignmentIds = assignments.map((a) => a.id);
+    const submissions = await prisma.submission.findMany({
+      where: { assignmentId: { in: assignmentIds } },
+      include: { grade: true },
+    });
+
+    // Build lookup: { `${studentId}-${assignmentId}` → submission }
+    const subMap = {};
+    for (const s of submissions) {
+      subMap[`${s.studentId}-${s.assignmentId}`] = s;
+    }
+
+    // Build student rows
+    const students = members.map((m) => {
+      const grades = assignments.map((a) => {
+        const sub = subMap[`${m.userId}-${a.id}`];
+        return {
+          assignmentId: a.id,
+          submitted: !!sub,
+          status: sub?.status ?? "NOT_SUBMITTED",
+          submittedAt: sub?.submittedAt ?? null,
+          score: sub?.grade?.score ?? null,
+          graded: !!sub?.grade,
+          submissionId: sub?.id ?? null,
+        };
+      });
+      return {
+        studentId: m.userId,
+        studentName: m.user.name,
+        studentEmail: m.user.email,
+        grades,
+      };
+    });
+
+    // Stats
+    const totalCells = members.length * assignments.length;
+    const submittedCount = submissions.length;
+    const gradedCount = submissions.filter((s) => s.grade).length;
+    const lateCount = submissions.filter((s) => s.status === "LATE_SUBMITTED").length;
+
+    res.json({
+      classId,
+      assignments: assignments.map((a) => ({
+        id: a.id,
+        title: a.title,
+        maxScore: a.maxScore,
+        dueDate: a.dueDate,
+      })),
+      students,
+      stats: {
+        totalStudents: members.length,
+        totalAssignments: assignments.length,
+        submissionRate: totalCells > 0 ? Math.round((submittedCount / totalCells) * 100) : 0,
+        gradingRate: submittedCount > 0 ? Math.round((gradedCount / submittedCount) * 100) : 0,
+        lateSubmissions: lateCount,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.patch("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
     const access = await checkClassAccess(req, req.params.id);

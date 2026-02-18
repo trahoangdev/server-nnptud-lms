@@ -7,6 +7,7 @@ import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
 import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
 import { getIO } from "../socket.js";
+import { createNotification } from "./notifications.js";
 
 const router = express.Router();
 
@@ -70,6 +71,19 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
       console.error("Socket error:", e.message);
     }
 
+    // Notify teacher
+    try {
+      await createNotification({
+        userId: assignment.class.teacherId,
+        type: "submission",
+        title: "Bài nộp mới",
+        message: `${req.user.name} đã nộp bài '${assignment.title}'`,
+        link: `/assignments/${assignment.id}`,
+      });
+    } catch (e) {
+      console.error("Notification error:", e.message);
+    }
+
     await logActivity({
       userId: req.user.id,
       userName: req.user.name,
@@ -84,6 +98,50 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
     });
 
     res.status(201).json(submission);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Student: cancel (delete) own submission — only if not graded & before deadline */
+router.delete("/submissions/:id", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
+  try {
+    const submissionId = Number(req.params.id);
+    const submission = await prisma.submission.findUnique({
+      where: { id: submissionId },
+      include: { assignment: true, grade: true },
+    });
+    if (!submission) return res.status(404).json({ error: "Submission not found" });
+    if (submission.studentId !== req.user.id) return res.status(403).json({ error: "Not your submission" });
+    if (submission.grade) return res.status(400).json({ error: "Cannot cancel a graded submission" });
+
+    const now = new Date();
+    const due = submission.assignment.dueDate ? new Date(submission.assignment.dueDate) : null;
+    if (due && now > due) {
+      return res.status(400).json({ error: "Cannot cancel after deadline" });
+    }
+
+    await prisma.submission.delete({ where: { id: submissionId } });
+
+    try {
+      const io = getIO();
+      io.to(`assignment:${submission.assignmentId}`).emit("submission:updated", { submission_id: submissionId, status: "CANCELLED" });
+    } catch (e) { /* ignore */ }
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: "student",
+      action: "Huỷ nộp bài",
+      actionType: "delete",
+      resource: "Submission",
+      resourceId: submissionId,
+      details: `Huỷ nộp bài '${submission.assignment.title}'`,
+      ipAddress: getClientIP(req),
+      status: "info",
+    });
+
+    res.json({ message: "Submission cancelled" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

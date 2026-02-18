@@ -292,6 +292,162 @@ router.patch("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), asy
 
 /* ================== ADMIN REPORTS ================== */
 
+/**
+ * GET /admin/reports/daily-active — unique active users per day (last 14 days, from activity logs)
+ */
+router.get("/admin/reports/daily-active", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const days = 14;
+    const results = [];
+    const now = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+      const logs = await prisma.activityLog.findMany({
+        where: { createdAt: { gte: dayStart, lt: dayEnd } },
+        select: { userId: true },
+      });
+      const uniqueUsers = new Set(logs.map((l) => l.userId).filter(Boolean));
+      const dd = String(dayStart.getDate()).padStart(2, "0");
+      const mm = String(dayStart.getMonth() + 1).padStart(2, "0");
+      results.push({ date: `${dd}/${mm}`, users: uniqueUsers.size });
+    }
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /admin/reports/user-growth — user registrations grouped by month (last 12 months)
+ */
+router.get("/admin/reports/user-growth", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const now = new Date();
+    const months = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push(d);
+    }
+
+    const results = await Promise.all(
+      months.map(async (monthStart) => {
+        const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1);
+        const label = `T${monthStart.getMonth() + 1}`;
+        const [teachers, students] = await Promise.all([
+          prisma.user.count({ where: { role: "TEACHER", createdAt: { lt: monthEnd } } }),
+          prisma.user.count({ where: { role: "STUDENT", createdAt: { lt: monthEnd } } }),
+        ]);
+        return { month: label, teachers, students };
+      })
+    );
+
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /admin/reports/class-activity — real class stats (assignments count, submissions count, avgGrade)
+ */
+router.get("/admin/reports/class-activity", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const classes = await prisma.class.findMany({
+      select: {
+        id: true,
+        name: true,
+        _count: { select: { assignments: true } },
+        assignments: {
+          select: {
+            id: true,
+            maxScore: true,
+            submissions: {
+              select: {
+                grade: { select: { score: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
+    });
+
+    const result = classes.map((cls) => {
+      const totalSubmissions = cls.assignments.reduce((sum, a) => sum + a.submissions.length, 0);
+      const allGrades = cls.assignments.flatMap((a) =>
+        a.submissions
+          .filter((s) => s.grade)
+          .map((s) => {
+            const maxScore = a.maxScore || 10;
+            return ((s.grade.score || 0) / maxScore) * 10;
+          })
+      );
+      const avgGrade = allGrades.length > 0 ? allGrades.reduce((s, g) => s + g, 0) / allGrades.length : 0;
+
+      return {
+        name: cls.name,
+        assignments: cls._count.assignments,
+        submissions: totalSubmissions,
+        avgGrade: Math.round(avgGrade * 10) / 10,
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /admin/reports/submissions-timeline — submissions grouped by week for current time range
+ */
+router.get("/admin/reports/submissions-timeline", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { timeRange = "month" } = req.query;
+    const now = new Date();
+    let startDate = new Date();
+
+    switch (timeRange) {
+      case "week": startDate.setDate(now.getDate() - 7); break;
+      case "month": startDate.setMonth(now.getMonth() - 1); break;
+      case "quarter": startDate.setMonth(now.getMonth() - 3); break;
+      case "year": startDate.setFullYear(now.getFullYear() - 1); break;
+    }
+
+    const submissions = await prisma.submission.findMany({
+      where: { submittedAt: { gte: startDate } },
+      select: {
+        submittedAt: true,
+        status: true,
+        assignment: { select: { dueDate: true } },
+      },
+      orderBy: { submittedAt: "asc" },
+    });
+
+    // Group by week
+    const weeks = new Map();
+    const oneWeek = 7 * 24 * 60 * 60 * 1000;
+    const startMs = startDate.getTime();
+
+    submissions.forEach((s) => {
+      const weekNum = Math.floor((new Date(s.submittedAt).getTime() - startMs) / oneWeek);
+      const label = `Tuần ${weekNum + 1}`;
+      if (!weeks.has(label)) weeks.set(label, { week: label, onTime: 0, late: 0 });
+      const entry = weeks.get(label);
+      const isLate = s.status === "LATE_SUBMITTED" || (s.assignment.dueDate && new Date(s.submittedAt) > new Date(s.assignment.dueDate));
+      if (isLate) entry.late++;
+      else entry.onTime++;
+    });
+
+    res.json(Array.from(weeks.values()));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get("/admin/reports/submissions", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
     const { timeRange = "month" } = req.query;

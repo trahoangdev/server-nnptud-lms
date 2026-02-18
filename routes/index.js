@@ -12,6 +12,9 @@ import gradeRoutes from "./grades.js";
 import commentRoutes from "./comments.js";
 import uploadRoutes from "./upload.js";
 import adminRoutes from "./admin.js";
+import dashboardRoutes from "./dashboard.js";
+import notificationRoutes from "./notifications.js";
+import conversationRoutes from "./conversations.js";
 
 const router = express.Router();
 
@@ -24,5 +27,8 @@ router.use(gradeRoutes);
 router.use(commentRoutes);
 router.use(uploadRoutes);
 router.use(adminRoutes);
+router.use(dashboardRoutes);
+router.use(notificationRoutes);
+router.use(conversationRoutes);
 
 export default router;

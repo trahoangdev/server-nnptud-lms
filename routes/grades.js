@@ -7,6 +7,7 @@ import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
 import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
 import { getIO } from "../socket.js";
+import { createNotification } from "./notifications.js";
 
 const router = express.Router();
 
@@ -58,6 +59,19 @@ router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), a
       });
     } catch (e) {
       console.error("Socket error:", e.message);
+    }
+
+    // Notify student
+    try {
+      createNotification({
+        userId: submission.studentId,
+        type: "grade",
+        title: "Đã chấm điểm",
+        message: `Bài '${submission.assignment.title}' được chấm ${grade.score} điểm`,
+        link: `/student/assignments/${submission.assignmentId}`,
+      });
+    } catch (e) {
+      console.error("Notification error:", e.message);
     }
 
     await logActivity({

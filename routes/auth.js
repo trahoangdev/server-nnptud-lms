@@ -7,7 +7,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import prisma from "../db.js";
 import { authenticateToken } from "../middleware/auth.js";
-import { logActivity, getClientIP } from "./_helpers.js";
+import { upload, logActivity, getClientIP } from "./_helpers.js";
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey123";
@@ -88,7 +88,7 @@ router.get("/me", authenticateToken, async (req, res) => {
     const userId = Number(req.user.id);
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, name: true, email: true, role: true, status: true, createdAt: true },
+      select: { id: true, name: true, email: true, role: true, avatar: true, status: true, createdAt: true },
     });
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
@@ -122,7 +122,7 @@ router.patch("/me", authenticateToken, async (req, res) => {
     const user = await prisma.user.update({
       where: { id: userId },
       data: updateData,
-      select: { id: true, name: true, email: true, role: true, status: true, createdAt: true },
+      select: { id: true, name: true, email: true, role: true, avatar: true, status: true, createdAt: true },
     });
 
     await logActivity({
@@ -183,6 +183,30 @@ router.patch("/me/password", authenticateToken, async (req, res) => {
     });
 
     res.json({ message: "Đổi mật khẩu thành công" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Upload avatar */
+router.post("/me/avatar", authenticateToken, (req, res, next) => {
+  upload.single("file")(req, res, (err) => {
+    if (err) return res.status(500).json({ error: err.message || "Upload failed" });
+    next();
+  });
+}, async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const userId = Number(req.user.id);
+    const avatarUrl = req.file.path;
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { avatar: avatarUrl },
+      select: { id: true, name: true, email: true, role: true, avatar: true, status: true, createdAt: true },
+    });
+
+    res.json(user);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

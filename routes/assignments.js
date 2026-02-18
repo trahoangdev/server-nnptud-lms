@@ -6,6 +6,8 @@ import express from "express";
 import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
 import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
+import { getIO } from "../socket.js";
+import { createNotification } from "./notifications.js";
 
 const router = express.Router();
 
@@ -41,6 +43,38 @@ router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"
       details: `Giao bài '${title}' cho lớp ${assignment.class.name}`,
       ipAddress: getClientIP(req),
     });
+
+    // Realtime: emit to class room + notify all students
+    try {
+      const io = getIO();
+      io.to(`class:${Number(classId)}`).emit("assignment:new", {
+        id: assignment.id,
+        title: assignment.title,
+        className: assignment.class.name,
+        classId: Number(classId),
+        dueDate: assignment.dueDate,
+        teacherName: req.user.name,
+      });
+
+      // Create notifications for all active students in the class
+      const members = await prisma.classMember.findMany({
+        where: { classId: Number(classId), status: "ACTIVE" },
+        select: { userId: true },
+      });
+      await Promise.allSettled(
+        members.map((m) =>
+          createNotification({
+            userId: m.userId,
+            type: "assignment",
+            title: "Bài tập mới",
+            message: `${req.user.name} đã giao bài '${title}' trong lớp ${assignment.class.name}`,
+            link: `/student/assignments`,
+          })
+        )
+      );
+    } catch (socketErr) {
+      console.error("Socket/notification error:", socketErr);
+    }
 
     res.status(201).json(assignment);
   } catch (error) {

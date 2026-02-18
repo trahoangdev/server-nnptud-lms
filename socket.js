@@ -48,6 +48,53 @@ export const initSocket = (httpServer) => {
       }
     });
 
+    socket.on("leave_room", (data) => {
+      const { room } = data || {};
+      if (room) {
+        socket.leave(room);
+        console.log(`Socket ${socket.id} left room ${room}`);
+      }
+    });
+
+    // ─── Conversations / Messaging ───────────────────────────────
+
+    socket.on("join_conversation", (data) => {
+      const { conversationId } = data || {};
+      if (conversationId) {
+        socket.join(`conversation:${conversationId}`);
+        console.log(`Socket ${socket.id} joined conversation:${conversationId}`);
+      }
+    });
+
+    socket.on("leave_conversation", (data) => {
+      const { conversationId } = data || {};
+      if (conversationId) {
+        socket.leave(`conversation:${conversationId}`);
+        console.log(`Socket ${socket.id} left conversation:${conversationId}`);
+      }
+    });
+
+    socket.on("typing", (data) => {
+      const { conversationId, userId, userName } = data || {};
+      if (conversationId) {
+        socket.to(`conversation:${conversationId}`).emit("user:typing", {
+          conversationId: String(conversationId),
+          userId: String(userId),
+          userName,
+        });
+      }
+    });
+
+    socket.on("stop_typing", (data) => {
+      const { conversationId, userId } = data || {};
+      if (conversationId) {
+        socket.to(`conversation:${conversationId}`).emit("user:stop_typing", {
+          conversationId: String(conversationId),
+          userId: String(userId),
+        });
+      }
+    });
+
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
     });

@@ -6,6 +6,7 @@ import express from "express";
 import prisma from "../db.js";
 import { authenticateToken } from "../middleware/auth.js";
 import { getIO } from "../socket.js";
+import { createNotification } from "./notifications.js";
 
 const router = express.Router();
 
@@ -14,11 +15,18 @@ router.post("/comments", authenticateToken, async (req, res) => {
     const { content, assignmentId, submissionId } = req.body;
     if (!assignmentId && !submissionId) return res.status(400).json({ error: "Target required" });
 
+    // If submissionId provided but no assignmentId, resolve it from the submission
+    let resolvedAssignmentId = assignmentId ? Number(assignmentId) : null;
+    if (submissionId && !resolvedAssignmentId) {
+      const sub = await prisma.submission.findUnique({ where: { id: Number(submissionId) }, select: { assignmentId: true } });
+      if (sub) resolvedAssignmentId = sub.assignmentId;
+    }
+
     const comment = await prisma.comment.create({
       data: {
         content,
         userId: req.user.id,
-        assignmentId: assignmentId ? Number(assignmentId) : null,
+        assignmentId: resolvedAssignmentId,
         submissionId: submissionId ? Number(submissionId) : null,
       },
       include: { user: { select: { id: true, name: true, role: true } } },
@@ -39,6 +47,34 @@ router.post("/comments", authenticateToken, async (req, res) => {
       if (submissionId) io.to(`submission:${submissionId}`).emit("comment:new", payload);
     } catch (e) {
       console.error("Socket error:", e.message);
+    }
+
+    // Notify relevant users about the comment
+    try {
+      if (submissionId) {
+        // Get submission owner to notify
+        const sub = await prisma.submission.findUnique({
+          where: { id: Number(submissionId) },
+          include: { assignment: { select: { title: true, classId: true, class: { select: { teacherId: true } } } } },
+        });
+        if (sub) {
+          // Notify student if teacher commented, or teacher if student commented
+          const recipientId = sub.studentId === req.user.id ? sub.assignment.class.teacherId : sub.studentId;
+          if (recipientId && recipientId !== req.user.id) {
+            createNotification({
+              userId: recipientId,
+              type: "comment",
+              title: "Nhận xét mới",
+              message: `${comment.user.name} đã nhận xét về bài '${sub.assignment.title}'`,
+              link: sub.studentId === req.user.id
+                ? `/assignments/${sub.assignmentId}`
+                : `/student/assignments/${sub.assignmentId}`,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Comment notification error:", e.message);
     }
 
     res.status(201).json(comment);
