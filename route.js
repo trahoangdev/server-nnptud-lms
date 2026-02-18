@@ -62,6 +62,46 @@ const storage = new CloudinaryStorage({
 
 const upload = multer({ storage });
 
+/* ================== AUDIT LOG HELPER ================== */
+
+/** Ghi log hành động vào DB (real audit trail) */
+async function logActivity({
+  userId = null,
+  userName = "System",
+  userRole = "system",
+  action,
+  actionType,
+  resource,
+  resourceId = null,
+  details,
+  ipAddress = null,
+  status = "success",
+}) {
+  try {
+    await prisma.activityLog.create({
+      data: {
+        userId,
+        userName,
+        userRole,
+        action,
+        actionType,
+        resource,
+        resourceId: resourceId ? String(resourceId) : null,
+        details,
+        ipAddress,
+        status,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to log activity:", err.message);
+  }
+}
+
+/** Helper: extract IP from request */
+function getClientIP(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+}
+
 /* ================== ROLE / ACCESS HELPERS (dùng sau middleware auth) ================== */
 
 /** Teacher: class must be owned by req.user. Student: must be member. Admin: allow. */
@@ -98,6 +138,19 @@ router.post("/register", async (req, res) => {
     const user = await prisma.user.create({
       data: { name, email, password: hashedPassword, role: role || "STUDENT", status: "ACTIVE" },
     });
+
+    await logActivity({
+      userId: user.id,
+      userName: name,
+      userRole: (role || "STUDENT").toLowerCase(),
+      action: "Đăng ký tài khoản",
+      actionType: "create",
+      resource: "User",
+      resourceId: user.id,
+      details: `Tài khoản ${email} được tạo (vai trò: ${role || "STUDENT"})`,
+      ipAddress: getClientIP(req),
+    });
+
     res.status(201).json({ message: "User created", userId: user.id });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -125,6 +178,19 @@ router.post("/login", async (req, res) => {
       JWT_SECRET,
       { expiresIn: "24h" }
     );
+
+    await logActivity({
+      userId: user.id,
+      userName: user.name,
+      userRole: user.role.toLowerCase(),
+      action: "Đăng nhập",
+      actionType: "login",
+      resource: "Auth",
+      resourceId: user.id,
+      details: `${user.name} đăng nhập thành công`,
+      ipAddress: getClientIP(req),
+    });
+
     res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -175,6 +241,19 @@ router.post("/classes", authenticateToken, authorizeRole(["ADMIN", "TEACHER"]), 
       data: { name, description: description || null, code, teacherId: Number(teacherId), status: "ACTIVE" },
       include: { teacher: { select: { id: true, name: true } } },
     });
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role.toLowerCase(),
+      action: "Tạo lớp học mới",
+      actionType: "create",
+      resource: "Class",
+      resourceId: newClass.id,
+      details: `Lớp '${name}' được tạo thành công (Mã: ${code})`,
+      ipAddress: getClientIP(req),
+    });
+
     res.status(201).json(newClass);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -314,10 +393,26 @@ router.delete("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMI
   try {
     const access = await checkClassAccess(req, req.params.id);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
-    await prisma.class.delete({
+
+    // Soft delete: archive thay vì xóa vĩnh viễn
+    const archived = await prisma.class.update({
       where: { id: Number(req.params.id) },
+      data: { status: "ARCHIVED" },
     });
-    res.json({ message: "Class deleted" });
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role.toLowerCase(),
+      action: "Xóa (lưu trữ) lớp học",
+      actionType: "delete",
+      resource: "Class",
+      resourceId: req.params.id,
+      details: `Lớp '${archived.name}' đã được lưu trữ (archived)`,
+      ipAddress: getClientIP(req),
+    });
+
+    res.json({ message: "Class archived", class: archived });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -345,6 +440,19 @@ router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"
       },
       include: { class: { select: { id: true, name: true } } },
     });
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role.toLowerCase(),
+      action: "Giao bài tập mới",
+      actionType: "create",
+      resource: "Assignment",
+      resourceId: assignment.id,
+      details: `Giao bài '${title}' cho lớp ${assignment.class.name}`,
+      ipAddress: getClientIP(req),
+    });
+
     res.status(201).json(assignment);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -575,6 +683,19 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
       console.error("Socket error:", e.message);
     }
 
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: "student",
+      action: "Nộp bài tập",
+      actionType: "create",
+      resource: "Submission",
+      resourceId: submission.id,
+      details: `Nộp bài '${assignment.title}' cho lớp ${assignment.class.name}`,
+      ipAddress: getClientIP(req),
+      status: status === "LATE_SUBMITTED" ? "warning" : "success",
+    });
+
     res.status(201).json(submission);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -643,7 +764,7 @@ router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), a
 
     try {
       const io = getIO();
-      io.to(`user_${submission.studentId}`).emit("grade:updated", {
+      io.to(`user:${submission.studentId}`).emit("grade:updated", {
         submission_id: submission.id,
         score: grade.score,
         graded_at: grade.gradedAt,
@@ -662,6 +783,18 @@ router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), a
     } catch (e) {
       console.error("Socket error:", e.message);
     }
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role.toLowerCase(),
+      action: "Chấm điểm bài tập",
+      actionType: "update",
+      resource: "Grade",
+      resourceId: grade.id,
+      details: `Chấm điểm ${grade.score} cho submission #${submission.id}`,
+      ipAddress: getClientIP(req),
+    });
 
     res.json(grade);
   } catch (error) {
@@ -907,157 +1040,47 @@ router.get("/admin/stats", authenticateToken, authorizeRole(["ADMIN"]), async (r
 router.get("/admin/activity-logs", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
     const { role, actionType, status, limit = 100, offset = 0 } = req.query;
-    
-    const logs = [];
-    
-    // Get recent user creations
-    const recentUsers = await prisma.user.findMany({
-      take: 20,
-      orderBy: { createdAt: "desc" },
-      select: { id: true, name: true, email: true, role: true, createdAt: true },
-    });
-    recentUsers.forEach((u) => {
-      logs.push({
-        id: `user-${u.id}`,
-        timestamp: u.createdAt.toISOString(),
-        userId: String(u.id),
-        userName: u.name,
-        userRole: u.role.toLowerCase(),
-        action: "Tạo tài khoản mới",
-        actionType: "create",
-        resource: "User",
-        resourceId: String(u.id),
-        details: `Tài khoản ${u.email} được tạo`,
-        ipAddress: "N/A",
-        status: "success",
-      });
-    });
-    
-    // Get recent class creations
-    const recentClasses = await prisma.class.findMany({
-      take: 20,
-      orderBy: { createdAt: "desc" },
-      include: { teacher: { select: { id: true, name: true, role: true } } },
-    });
-    recentClasses.forEach((c) => {
-      logs.push({
-        id: `class-${c.id}`,
-        timestamp: c.createdAt.toISOString(),
-        userId: String(c.teacherId),
-        userName: c.teacher.name,
-        userRole: c.teacher.role.toLowerCase(),
-        action: "Tạo lớp học mới",
-        actionType: "create",
-        resource: "Class",
-        resourceId: String(c.id),
-        details: `Lớp '${c.name}' được tạo thành công`,
-        ipAddress: "N/A",
-        status: "success",
-      });
-    });
-    
-    // Get recent assignments
-    const recentAssignments = await prisma.assignment.findMany({
-      take: 20,
-      orderBy: { createdAt: "desc" },
-      include: { createdBy: { select: { id: true, name: true, role: true } }, class: { select: { name: true } } },
-    });
-    recentAssignments.forEach((a) => {
-      if (a.createdBy) {
-        logs.push({
-          id: `assign-${a.id}`,
-          timestamp: a.createdAt.toISOString(),
-          userId: String(a.createdById),
-          userName: a.createdBy.name,
-          userRole: a.createdBy.role.toLowerCase(),
-          action: "Giao bài tập mới",
-          actionType: "create",
-          resource: "Assignment",
-          resourceId: String(a.id),
-          details: `Giao bài '${a.title}' cho lớp ${a.class.name}`,
-          ipAddress: "N/A",
-          status: "success",
-        });
-      }
-    });
-    
-    // Get recent submissions
-    const recentSubmissions = await prisma.submission.findMany({
-      take: 20,
-      orderBy: { submittedAt: "desc" },
-      include: { student: { select: { id: true, name: true, role: true } }, assignment: { select: { title: true, class: { select: { name: true } } } } },
-    });
-    recentSubmissions.forEach((s) => {
-      logs.push({
-        id: `sub-${s.id}`,
-        timestamp: s.submittedAt.toISOString(),
-        userId: String(s.studentId),
-        userName: s.student.name,
-        userRole: s.student.role.toLowerCase(),
-        action: "Nộp bài tập",
-        actionType: "create",
-        resource: "Submission",
-        resourceId: String(s.id),
-        details: `Nộp bài '${s.assignment.title}' cho lớp ${s.assignment.class.name}`,
-        ipAddress: "N/A",
-        status: s.status === "LATE_SUBMITTED" ? "warning" : "success",
-      });
-    });
-    
-    // Get recent grades
-    const recentGrades = await prisma.grade.findMany({
-      take: 20,
-      orderBy: { gradedAt: "desc" },
-      include: {
-        gradedBy: { select: { id: true, name: true, role: true } },
-        submission: {
-          include: {
-            student: { select: { name: true } },
-            assignment: { select: { title: true } },
-          },
-        },
-      },
-    });
-    recentGrades.forEach((g) => {
-      if (g.gradedBy) {
-        logs.push({
-          id: `grade-${g.id}`,
-          timestamp: g.gradedAt.toISOString(),
-          userId: String(g.gradedById),
-          userName: g.gradedBy.name,
-          userRole: g.gradedBy.role.toLowerCase(),
-          action: "Chấm điểm bài tập",
-          actionType: "update",
-          resource: "Grade",
-          resourceId: String(g.id),
-          details: `Chấm điểm ${g.score} cho bài nộp của học sinh ${g.submission.student.name}`,
-          ipAddress: "N/A",
-          status: "success",
-        });
-      }
-    });
-    
-    // Sort by timestamp desc
-    logs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    // Apply filters
-    let filteredLogs = logs;
+
+    // Build filters from query params
+    const where = {};
     if (role && role !== "all") {
-      filteredLogs = filteredLogs.filter((log) => log.userRole === role.toLowerCase());
+      where.userRole = role.toLowerCase();
     }
     if (actionType && actionType !== "all") {
-      filteredLogs = filteredLogs.filter((log) => log.actionType === actionType);
+      where.actionType = actionType;
     }
     if (status && status !== "all") {
-      filteredLogs = filteredLogs.filter((log) => log.status === status);
+      where.status = status;
     }
-    
-    // Pagination
-    const total = filteredLogs.length;
-    const paginatedLogs = filteredLogs.slice(Number(offset), Number(offset) + Number(limit));
-    
+
+    const [logs, total] = await Promise.all([
+      prisma.activityLog.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip: Number(offset),
+        take: Number(limit),
+      }),
+      prisma.activityLog.count({ where }),
+    ]);
+
+    // Map to response format matching frontend expectations
+    const formattedLogs = logs.map((log) => ({
+      id: String(log.id),
+      timestamp: log.createdAt.toISOString(),
+      userId: log.userId ? String(log.userId) : null,
+      userName: log.userName,
+      userRole: log.userRole,
+      action: log.action,
+      actionType: log.actionType,
+      resource: log.resource,
+      resourceId: log.resourceId,
+      details: log.details,
+      ipAddress: log.ipAddress || "N/A",
+      status: log.status,
+    }));
+
     res.json({
-      logs: paginatedLogs,
+      logs: formattedLogs,
       total,
       limit: Number(limit),
       offset: Number(offset),
@@ -1068,52 +1091,74 @@ router.get("/admin/activity-logs", authenticateToken, authorizeRole(["ADMIN"]), 
 });
 
 /** Admin settings - simple key-value store simulation */
+/** Default settings - used when no DB entry exists */
+const DEFAULT_SETTINGS = {
+  system: {
+    siteName: "NNPTUD LMS",
+    siteUrl: process.env.SITE_URL || "https://lms.edu.vn",
+    adminEmail: process.env.ADMIN_EMAIL || "admin@lms.edu.vn",
+    maxFileSize: 50,
+    maxStoragePerClass: 5,
+    sessionTimeout: 30,
+    maintenanceMode: false,
+  },
+  security: {
+    twoFactorRequired: false,
+    passwordMinLength: 8,
+    passwordRequireUppercase: true,
+    passwordRequireNumber: true,
+    passwordRequireSpecial: false,
+    maxLoginAttempts: 5,
+    lockoutDuration: 15,
+    sessionConcurrent: true,
+  },
+  email: {
+    smtpHost: process.env.SMTP_HOST || "smtp.gmail.com",
+    smtpPort: process.env.SMTP_PORT || "587",
+    smtpUser: process.env.SMTP_USER || "",
+    smtpSecure: "tls",
+    fromName: "NNPTUD LMS",
+    fromEmail: process.env.SMTP_FROM || "noreply@lms.edu.vn",
+  },
+  backup: {
+    autoBackup: true,
+    backupFrequency: "daily",
+    backupRetention: 30,
+    backupLocation: "local",
+  },
+  notifications: {
+    notifyNewUser: true,
+    notifyNewClass: true,
+    notifyStorageWarning: true,
+    notifySecurityAlert: true,
+    dailyReport: false,
+    weeklyReport: true,
+  },
+};
+
 router.get("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
-    // Return default settings (in real app, store in DB)
-    res.json({
-      system: {
-        siteName: "NNPTUD LMS",
-        siteUrl: process.env.SITE_URL || "https://lms.edu.vn",
-        adminEmail: process.env.ADMIN_EMAIL || "admin@lms.edu.vn",
-        maxFileSize: 50,
-        maxStoragePerClass: 5,
-        sessionTimeout: 30,
-        maintenanceMode: false,
-      },
-      security: {
-        twoFactorRequired: false,
-        passwordMinLength: 8,
-        passwordRequireUppercase: true,
-        passwordRequireNumber: true,
-        passwordRequireSpecial: false,
-        maxLoginAttempts: 5,
-        lockoutDuration: 15,
-        sessionConcurrent: true,
-      },
-      email: {
-        smtpHost: process.env.SMTP_HOST || "smtp.gmail.com",
-        smtpPort: process.env.SMTP_PORT || "587",
-        smtpUser: process.env.SMTP_USER || "",
-        smtpSecure: "tls",
-        fromName: "NNPTUD LMS",
-        fromEmail: process.env.SMTP_FROM || "noreply@lms.edu.vn",
-      },
-      backup: {
-        autoBackup: true,
-        backupFrequency: "daily",
-        backupRetention: 30,
-        backupLocation: "local",
-      },
-      notifications: {
-        notifyNewUser: true,
-        notifyNewClass: true,
-        notifyStorageWarning: true,
-        notifySecurityAlert: true,
-        dailyReport: false,
-        weeklyReport: true,
-      },
+    // Load persisted settings from DB, merge with defaults
+    const dbSettings = await prisma.setting.findMany();
+    const settingsMap = {};
+    dbSettings.forEach((s) => {
+      try {
+        settingsMap[s.key] = JSON.parse(s.value);
+      } catch {
+        settingsMap[s.key] = s.value;
+      }
     });
+
+    // Merge: DB values override defaults
+    const result = {
+      system: { ...DEFAULT_SETTINGS.system, ...settingsMap.system },
+      security: { ...DEFAULT_SETTINGS.security, ...settingsMap.security },
+      email: { ...DEFAULT_SETTINGS.email, ...settingsMap.email },
+      backup: { ...DEFAULT_SETTINGS.backup, ...settingsMap.backup },
+      notifications: { ...DEFAULT_SETTINGS.notifications, ...settingsMap.notifications },
+    };
+
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1122,7 +1167,32 @@ router.get("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), async
 router.patch("/admin/settings", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
     const { system, security, email, backup, notifications } = req.body;
-    // In real app, save to DB. For now, just return success
+    const sections = { system, security, email, backup, notifications };
+
+    // Persist each section to DB as key-value
+    const upsertPromises = Object.entries(sections)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) =>
+        prisma.setting.upsert({
+          where: { key },
+          update: { value: JSON.stringify(value) },
+          create: { key, value: JSON.stringify(value) },
+        })
+      );
+
+    await Promise.all(upsertPromises);
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role.toLowerCase(),
+      action: "Cập nhật cài đặt hệ thống",
+      actionType: "update",
+      resource: "Setting",
+      details: `Cập nhật settings: ${Object.keys(sections).filter((k) => sections[k]).join(", ")}`,
+      ipAddress: getClientIP(req),
+    });
+
     res.json({ message: "Settings updated successfully", settings: { system, security, email, backup, notifications } });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1179,24 +1249,41 @@ router.get("/admin/reports/submissions", authenticateToken, authorizeRole(["ADMI
 router.get("/admin/reports/grades", authenticateToken, authorizeRole(["ADMIN"]), async (req, res) => {
   try {
     const grades = await prisma.grade.findMany({
-      include: { submission: { select: { assignmentId: true } } },
+      include: {
+        submission: {
+          select: {
+            assignmentId: true,
+            assignment: { select: { maxScore: true } },
+          },
+        },
+      },
     });
-    
+
+    // Normalize scores to percentage (0-100) based on each assignment's maxScore
+    const normalizedScores = grades.map((g) => {
+      const maxScore = g.submission?.assignment?.maxScore || 10;
+      return (g.score / maxScore) * 100;
+    });
+
+    // Distribution based on normalized percentage (0-100 scale)
     const gradeRanges = {
-      excellent: grades.filter((g) => g.score >= 9).length,
-      good: grades.filter((g) => g.score >= 8 && g.score < 9).length,
-      average: grades.filter((g) => g.score >= 6.5 && g.score < 8).length,
-      belowAverage: grades.filter((g) => g.score >= 5 && g.score < 6.5).length,
-      poor: grades.filter((g) => g.score < 5).length,
+      excellent: normalizedScores.filter((pct) => pct >= 90).length,
+      good: normalizedScores.filter((pct) => pct >= 80 && pct < 90).length,
+      average: normalizedScores.filter((pct) => pct >= 65 && pct < 80).length,
+      belowAverage: normalizedScores.filter((pct) => pct >= 50 && pct < 65).length,
+      poor: normalizedScores.filter((pct) => pct < 50).length,
     };
-    
+
     const total = grades.length;
+    const avgPct = total > 0 ? normalizedScores.reduce((sum, p) => sum + p, 0) / total : 0;
+    // Also compute average raw score (for display purposes)
     const avgScore = total > 0 ? grades.reduce((sum, g) => sum + g.score, 0) / total : 0;
-    
+
     res.json({
       distribution: gradeRanges,
       total,
       average: avgScore,
+      averagePercentage: avgPct,
       percentages: {
         excellent: total > 0 ? (gradeRanges.excellent / total) * 100 : 0,
         good: total > 0 ? (gradeRanges.good / total) * 100 : 0,

@@ -1,7 +1,7 @@
 /**
  * Socket.io - PRD §6 Realtime & Socket
  * Namespace: / (default) hoặc /lms
- * Rooms: class:{class_id}, assignment:{assignment_id}, submission:{submission_id}, user_{user_id}, teachers
+ * Rooms: class:{class_id}, assignment:{assignment_id}, submission:{submission_id}, user:{user_id}, teachers
  */
 
 import { Server } from "socket.io";
@@ -31,8 +31,8 @@ export const initSocket = (httpServer) => {
       const { userId, role, classId, assignmentId, submissionId } = data || {};
       if (!userId) return;
 
-      socket.join(`user_${userId}`);
-      console.log(`User ${userId} joined room user_${userId}`);
+      socket.join(`user:${userId}`);
+      console.log(`User ${userId} joined room user:${userId}`);
 
       if (role === "TEACHER" || role === "ADMIN") {
         socket.join("teachers");
