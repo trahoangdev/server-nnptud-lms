@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { authenticateToken } from "../middleware/auth.js";
 import prisma from "../db.js";
 import { getIO } from "../socket.js";
+import { parseId } from "./_helpers.js";
 
 const router = express.Router();
 
@@ -148,13 +149,25 @@ router.post("/conversations", authenticateToken, async (req, res) => {
     const { name, type = "group", classId, memberIds } = req.body;
     const userId = req.user.id;
 
+    if (name && typeof name === "string" && name.length > 200) {
+      return res.status(400).json({ error: "Tên hội thoại không được quá 200 ký tự" });
+    }
+    if (type && !["group", "class", "direct"].includes(type)) {
+      return res.status(400).json({ error: "Loại hội thoại không hợp lệ" });
+    }
+    if (memberIds && (!Array.isArray(memberIds) || memberIds.some(id => !parseId(id)))) {
+      return res.status(400).json({ error: "Danh sách thành viên không hợp lệ" });
+    }
+
     // If class conversation, auto-add all class members
-    let finalMemberIds = memberIds || [];
+    let finalMemberIds = memberIds ? memberIds.map(id => parseId(id)) : [];
     let convName = name;
 
     if (classId) {
+      const parsedClassId = parseId(classId);
+      if (!parsedClassId) return res.status(400).json({ error: "classId không hợp lệ" });
       const cls = await prisma.class.findUnique({
-        where: { id: Number(classId) },
+        where: { id: parsedClassId },
         include: {
           members: { where: { status: "ACTIVE" }, select: { userId: true } },
         },
@@ -163,7 +176,7 @@ router.post("/conversations", authenticateToken, async (req, res) => {
 
       // Check if class conversation already exists
       const existing = await prisma.conversation.findFirst({
-        where: { classId: Number(classId), type: "class" },
+        where: { classId: parsedClassId, type: "class" },
       });
       if (existing) {
         return res.status(400).json({
@@ -199,7 +212,7 @@ router.post("/conversations", authenticateToken, async (req, res) => {
       data: {
         name: convName,
         type: classId ? "class" : type,
-        classId: classId ? Number(classId) : null,
+        classId: classId ? parseId(classId) : null,
         roomCode,
         members: {
           create: finalMemberIds.map((id) => ({ userId: id })),
@@ -268,9 +281,14 @@ router.post("/conversations/join", authenticateToken, async (req, res) => {
 // ─── PATCH /api/conversations/:id — update conversation (teacher only) ───
 router.patch("/conversations/:id", authenticateToken, async (req, res) => {
   try {
-    const conversationId = Number(req.params.id);
+    const conversationId = parseId(req.params.id);
+    if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
     const userId = req.user.id;
     const { name } = req.body;
+
+    if (name !== undefined && typeof name === "string" && name.length > 200) {
+      return res.status(400).json({ error: "Tên hội thoại không được quá 200 ký tự" });
+    }
 
     // Only TEACHER / ADMIN can edit
     if (req.user.role !== "TEACHER" && req.user.role !== "ADMIN") {
@@ -313,7 +331,8 @@ router.patch("/conversations/:id", authenticateToken, async (req, res) => {
 // ─── DELETE /api/conversations/:id — delete conversation (teacher only) ───
 router.delete("/conversations/:id", authenticateToken, async (req, res) => {
   try {
-    const conversationId = Number(req.params.id);
+    const conversationId = parseId(req.params.id);
+    if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
     const userId = req.user.id;
 
     // Only TEACHER / ADMIN can delete
@@ -353,9 +372,11 @@ router.get(
   authenticateToken,
   async (req, res) => {
     try {
-      const conversationId = Number(req.params.id);
+      const conversationId = parseId(req.params.id);
+      if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
       const userId = req.user.id;
       const { cursor, limit = 50 } = req.query;
+      const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
 
       // Verify membership
       const membership = await prisma.conversationMember.findUnique({
@@ -372,10 +393,10 @@ router.get(
       const messages = await prisma.message.findMany({
         where: {
           conversationId,
-          ...(cursor ? { id: { lt: Number(cursor) } } : {}),
+          ...(cursor ? { id: { lt: parseId(cursor) || 0 } } : {}),
         },
         orderBy: { createdAt: "desc" },
-        take: Number(limit),
+        take: parsedLimit,
       });
 
       // Get unique sender IDs
@@ -396,11 +417,12 @@ router.get(
             senderId: String(msg.senderId),
             senderName: sender?.name || "Unknown",
             senderRole: (sender?.role || "STUDENT").toLowerCase(),
-            content: msg.content,
+            content: msg.isRecalled ? "Tin nhắn đã được thu hồi" : msg.content,
             time: formatTime(msg.createdAt),
             date: formatDate(msg.createdAt),
             isOwn: msg.senderId === userId,
             status: "delivered",
+            isRecalled: msg.isRecalled,
           };
         });
 
@@ -412,7 +434,7 @@ router.get(
         data: { lastReadAt: new Date() },
       });
 
-      const hasMore = messages.length === Number(limit);
+      const hasMore = messages.length === parsedLimit;
       const nextCursor = messages.length > 0 ? messages[0].id : null;
 
       res.json({ messages: formatted, hasMore, nextCursor });
@@ -429,12 +451,16 @@ router.post(
   authenticateToken,
   async (req, res) => {
     try {
-      const conversationId = Number(req.params.id);
+      const conversationId = parseId(req.params.id);
+      if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
       const userId = req.user.id;
       const { content } = req.body;
 
       if (!content?.trim()) {
         return res.status(400).json({ error: "Nội dung tin nhắn không được trống" });
+      }
+      if (content.length > 5000) {
+        return res.status(400).json({ error: "Nội dung tin nhắn không được quá 5000 ký tự" });
       }
 
       // Verify membership
@@ -503,13 +529,137 @@ router.post(
   }
 );
 
+// ─── PATCH /api/conversations/:id/messages/:messageId/recall — recall a message ───
+router.patch(
+  "/conversations/:id/messages/:messageId/recall",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const conversationId = parseId(req.params.id);
+      if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
+      const messageId = parseId(req.params.messageId);
+      if (!messageId) return res.status(400).json({ error: "ID tin nhắn không hợp lệ" });
+      const userId = req.user.id;
+
+      // Verify membership
+      const membership = await prisma.conversationMember.findUnique({
+        where: {
+          conversationId_userId: { conversationId, userId },
+        },
+      });
+      if (!membership) {
+        return res
+          .status(403)
+          .json({ error: "Bạn không phải thành viên hội thoại này" });
+      }
+
+      // Find the message
+      const message = await prisma.message.findUnique({
+        where: { id: messageId },
+      });
+      if (!message || message.conversationId !== conversationId) {
+        return res.status(404).json({ error: "Tin nhắn không tồn tại" });
+      }
+
+      // Only sender can recall their own message
+      if (message.senderId !== userId) {
+        return res
+          .status(403)
+          .json({ error: "Bạn chỉ có thể thu hồi tin nhắn của mình" });
+      }
+
+      if (message.isRecalled) {
+        return res.status(400).json({ error: "Tin nhắn đã được thu hồi" });
+      }
+
+      // Soft-delete: mark as recalled
+      await prisma.message.update({
+        where: { id: messageId },
+        data: { isRecalled: true },
+      });
+
+      // Notify via socket
+      const io = getIO();
+      io.to(`conversation:${conversationId}`).emit("message:recalled", {
+        messageId: String(messageId),
+        conversationId: String(conversationId),
+      });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("PATCH /conversations/:id/messages/:messageId/recall error:", err);
+      res.status(500).json({ error: "Lỗi thu hồi tin nhắn" });
+    }
+  }
+);
+
+// ─── DELETE /api/conversations/:id/messages/:messageId — delete a message (sender only) ───
+router.delete(
+  "/conversations/:id/messages/:messageId",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const conversationId = parseId(req.params.id);
+      if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
+      const messageId = parseId(req.params.messageId);
+      if (!messageId) return res.status(400).json({ error: "ID tin nhắn không hợp lệ" });
+      const userId = req.user.id;
+
+      // Verify membership
+      const membership = await prisma.conversationMember.findUnique({
+        where: {
+          conversationId_userId: { conversationId, userId },
+        },
+      });
+      if (!membership) {
+        return res
+          .status(403)
+          .json({ error: "Bạn không phải thành viên hội thoại này" });
+      }
+
+      // Find the message
+      const message = await prisma.message.findUnique({
+        where: { id: messageId },
+      });
+      if (!message || message.conversationId !== conversationId) {
+        return res.status(404).json({ error: "Tin nhắn không tồn tại" });
+      }
+
+      // Only sender can delete their own message
+      if (message.senderId !== userId) {
+        return res
+          .status(403)
+          .json({ error: "Bạn chỉ có thể xoá tin nhắn của mình" });
+      }
+
+      // Hard delete
+      await prisma.message.delete({
+        where: { id: messageId },
+      });
+
+      // Notify via socket
+      const io = getIO();
+      io.to(`conversation:${conversationId}`).emit("message:deleted", {
+        messageId: String(messageId),
+        conversationId: String(conversationId),
+      });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("DELETE /conversations/:id/messages/:messageId error:", err);
+      res.status(500).json({ error: "Lỗi xoá tin nhắn" });
+    }
+  }
+);
+
 // ─── POST /api/conversations/:id/read — mark conversation as read ───
 router.post(
   "/conversations/:id/read",
   authenticateToken,
   async (req, res) => {
     try {
-      const conversationId = Number(req.params.id);
+      const conversationId = parseId(req.params.id);
+      if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
       const userId = req.user.id;
 
       await prisma.conversationMember.update({

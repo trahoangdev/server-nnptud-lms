@@ -5,7 +5,7 @@
 import express from "express";
 import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
-import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
+import { checkClassAccess, logActivity, getClientIP, parseId } from "./_helpers.js";
 import { getIO } from "../socket.js";
 import { createNotification } from "./notifications.js";
 
@@ -14,8 +14,21 @@ const router = express.Router();
 router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
   try {
     const { content, fileUrl, assignmentId } = req.body;
+
+    const parsedAssignmentId = parseId(assignmentId);
+    if (!parsedAssignmentId) return res.status(400).json({ error: "assignmentId không hợp lệ" });
+    if (content && typeof content === "string" && content.length > 50000) {
+      return res.status(400).json({ error: "Nội dung bài nộp không được quá 50000 ký tự" });
+    }
+    if (fileUrl && typeof fileUrl === "string" && fileUrl.length > 2000) {
+      return res.status(400).json({ error: "URL file không hợp lệ" });
+    }
+    if (!content?.trim() && !fileUrl) {
+      return res.status(400).json({ error: "Vui lòng nhập nội dung hoặc đính kèm file" });
+    }
+
     const assignment = await prisma.assignment.findUnique({
-      where: { id: Number(assignmentId) },
+      where: { id: parsedAssignmentId },
       include: { class: true },
     });
     if (!assignment) return res.status(404).json({ error: "Assignment not found" });
@@ -37,7 +50,7 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
 
     const submission = await prisma.submission.upsert({
       where: {
-        assignmentId_studentId: { assignmentId: Number(assignmentId), studentId: req.user.id },
+        assignmentId_studentId: { assignmentId: parsedAssignmentId, studentId: req.user.id },
       },
       update: {
         content: content ?? undefined,
@@ -49,7 +62,7 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
       create: {
         content: content || null,
         fileUrl: fileUrl || null,
-        assignmentId: Number(assignmentId),
+        assignmentId: parsedAssignmentId,
         studentId: req.user.id,
         status,
         lastUpdatedAt: now,
@@ -106,7 +119,9 @@ router.post("/submissions", authenticateToken, authorizeRole(["STUDENT"]), async
 /** Student: cancel (delete) own submission — only if not graded & before deadline */
 router.delete("/submissions/:id", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
   try {
-    const submissionId = Number(req.params.id);
+    const submissionId = parseId(req.params.id);
+    if (!submissionId) return res.status(400).json({ error: "ID bài nộp không hợp lệ" });
+
     const submission = await prisma.submission.findUnique({
       where: { id: submissionId },
       include: { assignment: true, grade: true },
@@ -149,7 +164,9 @@ router.delete("/submissions/:id", authenticateToken, authorizeRole(["STUDENT"]),
 
 router.get("/assignments/:assignmentId/submissions", authenticateToken, async (req, res) => {
   try {
-    const assignmentId = Number(req.params.assignmentId);
+    const assignmentId = parseId(req.params.assignmentId);
+    if (!assignmentId) return res.status(400).json({ error: "assignmentId không hợp lệ" });
+
     const assignment = await prisma.assignment.findUnique({
       where: { id: assignmentId },
       include: { class: true },

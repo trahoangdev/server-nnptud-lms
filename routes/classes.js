@@ -5,19 +5,27 @@
 import express from "express";
 import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
-import { checkClassAccess, ensureUniqueClassCode, logActivity, getClientIP } from "./_helpers.js";
+import { checkClassAccess, ensureUniqueClassCode, logActivity, getClientIP, parseId, validateString } from "./_helpers.js";
 
 const router = express.Router();
 
 router.post("/classes", authenticateToken, authorizeRole(["ADMIN", "TEACHER"]), async (req, res) => {
   try {
     const { name, description } = req.body;
+    const validName = validateString(name, 200);
+    if (!validName) return res.status(400).json({ error: "Tên lớp không hợp lệ (tối đa 200 ký tự)" });
+    if (description && typeof description === "string" && description.length > 2000) {
+      return res.status(400).json({ error: "Mô tả không được quá 2000 ký tự" });
+    }
+
     const teacherId = req.user.role === "TEACHER" ? req.user.id : req.body.teacherId;
     if (!teacherId) return res.status(400).json({ error: "teacherId required for Admin" });
+    const parsedTeacherId = parseId(teacherId);
+    if (!parsedTeacherId) return res.status(400).json({ error: "teacherId không hợp lệ" });
 
     const code = await ensureUniqueClassCode();
     const newClass = await prisma.class.create({
-      data: { name, description: description || null, code, teacherId: Number(teacherId), status: "ACTIVE" },
+      data: { name: validName, description: description?.trim() || null, code, teacherId: parsedTeacherId, status: "ACTIVE" },
       include: { teacher: { select: { id: true, name: true } } },
     });
 
@@ -85,11 +93,14 @@ router.get("/classes", authenticateToken, async (req, res) => {
 
 router.get("/classes/:id", authenticateToken, async (req, res) => {
   try {
-    const access = await checkClassAccess(req, req.params.id);
+    const classId = parseId(req.params.id);
+    if (!classId) return res.status(400).json({ error: "ID lớp không hợp lệ" });
+
+    const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
     const classItem = await prisma.class.findUnique({
-      where: { id: Number(req.params.id) },
+      where: { id: classId },
       include: {
         teacher: { select: { id: true, name: true, email: true } },
         members: { where: { status: "ACTIVE" }, include: { user: { select: { id: true, name: true, email: true } } } },
@@ -138,12 +149,19 @@ router.post("/classes/join", authenticateToken, authorizeRole(["STUDENT"]), asyn
 
 router.post("/classes/:id/enroll", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
+    const classId = parseId(req.params.id);
+    if (!classId) return res.status(400).json({ error: "ID lớp không hợp lệ" });
+
     let studentId = req.user.id;
     if (req.user.role === "TEACHER" || req.user.role === "ADMIN") {
       if (!req.body.studentId) return res.status(400).json({ error: "Provide studentId" });
-      studentId = req.body.studentId;
+      const parsedStudentId = parseId(req.body.studentId);
+      if (!parsedStudentId) return res.status(400).json({ error: "studentId không hợp lệ" });
+      // Verify student exists
+      const studentExists = await prisma.user.findUnique({ where: { id: parsedStudentId }, select: { id: true } });
+      if (!studentExists) return res.status(404).json({ error: "Sinh viên không tồn tại" });
+      studentId = parsedStudentId;
     }
-    const classId = Number(req.params.id);
     const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
     if (access.class.teacherId !== req.user.id && req.user.role !== "ADMIN") {
@@ -151,9 +169,9 @@ router.post("/classes/:id/enroll", authenticateToken, authorizeRole(["TEACHER", 
     }
 
     await prisma.classMember.upsert({
-      where: { classId_userId: { classId, userId: Number(studentId) } },
+      where: { classId_userId: { classId, userId: studentId } },
       update: { status: "ACTIVE" },
-      create: { classId, userId: Number(studentId), status: "ACTIVE" },
+      create: { classId, userId: studentId, status: "ACTIVE" },
     });
     res.json({ message: "Enrolled successfully" });
   } catch (error) {
@@ -164,7 +182,8 @@ router.post("/classes/:id/enroll", authenticateToken, authorizeRole(["TEACHER", 
 /** Gradebook — full grade matrix for a class */
 router.get("/classes/:id/gradebook", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const classId = Number(req.params.id);
+    const classId = parseId(req.params.id);
+    if (!classId) return res.status(400).json({ error: "ID lớp không hợp lệ" });
     const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
@@ -246,16 +265,27 @@ router.get("/classes/:id/gradebook", authenticateToken, authorizeRole(["TEACHER"
 
 router.patch("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const access = await checkClassAccess(req, req.params.id);
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "ID lớp không hợp lệ" });
+    const access = await checkClassAccess(req, id);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
     const { name, description, status } = req.body;
     const data = {};
-    if (name !== undefined) data.name = name;
-    if (description !== undefined) data.description = description;
+    if (name !== undefined) {
+      const validName = validateString(name, 200);
+      if (!validName) return res.status(400).json({ error: "Tên lớp không hợp lệ (tối đa 200 ký tự)" });
+      data.name = validName;
+    }
+    if (description !== undefined) {
+      if (typeof description === "string" && description.length > 2000) {
+        return res.status(400).json({ error: "Mô tả không được quá 2000 ký tự" });
+      }
+      data.description = description?.trim() || null;
+    }
     if (status !== undefined && ["ACTIVE", "ARCHIVED"].includes(status)) data.status = status;
 
     const updated = await prisma.class.update({
-      where: { id: Number(req.params.id) },
+      where: { id },
       data,
     });
     res.json(updated);
@@ -266,12 +296,14 @@ router.patch("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN
 
 router.delete("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const access = await checkClassAccess(req, req.params.id);
+    const classId = parseId(req.params.id);
+    if (!classId) return res.status(400).json({ error: "ID lớp không hợp lệ" });
+    const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
     // Soft delete: archive thay vì xóa vĩnh viễn
     const archived = await prisma.class.update({
-      where: { id: Number(req.params.id) },
+      where: { id: classId },
       data: { status: "ARCHIVED" },
     });
 

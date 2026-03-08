@@ -5,7 +5,7 @@
 import express from "express";
 import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
-import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
+import { checkClassAccess, logActivity, getClientIP, parseId, validateString, isValidDate } from "./_helpers.js";
 import { getIO } from "../socket.js";
 import { createNotification } from "./notifications.js";
 
@@ -14,19 +14,37 @@ const router = express.Router();
 router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
     const { title, description, dueDate, classId, fileUrl, startTime, allowLate, maxScore } = req.body;
-    const access = await checkClassAccess(req, classId);
+
+    const validTitle = validateString(title, 300);
+    if (!validTitle) return res.status(400).json({ error: "Tiêu đề bài tập không hợp lệ (tối đa 300 ký tự)" });
+    if (description && typeof description === "string" && description.length > 50000) {
+      return res.status(400).json({ error: "Mô tả không được quá 50000 ký tự" });
+    }
+    const parsedClassId = parseId(classId);
+    if (!parsedClassId) return res.status(400).json({ error: "classId không hợp lệ" });
+    if (dueDate && !isValidDate(dueDate)) return res.status(400).json({ error: "Hạn nộp không hợp lệ" });
+    if (startTime && !isValidDate(startTime)) return res.status(400).json({ error: "Thời gian bắt đầu không hợp lệ" });
+    if (maxScore != null) {
+      const parsed = parseInt(maxScore, 10);
+      if (isNaN(parsed) || parsed < 0 || parsed > 1000) return res.status(400).json({ error: "Điểm tối đa phải từ 0 đến 1000" });
+    }
+    if (fileUrl && typeof fileUrl === "string" && fileUrl.length > 2000) {
+      return res.status(400).json({ error: "URL file không hợp lệ" });
+    }
+
+    const access = await checkClassAccess(req, parsedClassId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
     const assignment = await prisma.assignment.create({
       data: {
-        title,
+        title: validTitle,
         description: description || null,
         fileUrl: fileUrl || null,
         startTime: startTime ? new Date(startTime) : null,
         dueDate: dueDate ? new Date(dueDate) : null,
         allowLate: allowLate === true,
         maxScore: maxScore != null ? Math.max(0, parseInt(maxScore, 10) || 10) : 10,
-        classId: Number(classId),
+        classId: parsedClassId,
         createdById: req.user.id,
       },
       include: { class: { select: { id: true, name: true } } },
@@ -47,18 +65,18 @@ router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"
     // Realtime: emit to class room + notify all students
     try {
       const io = getIO();
-      io.to(`class:${Number(classId)}`).emit("assignment:new", {
+      io.to(`class:${parsedClassId}`).emit("assignment:new", {
         id: assignment.id,
         title: assignment.title,
         className: assignment.class.name,
-        classId: Number(classId),
+        classId: parsedClassId,
         dueDate: assignment.dueDate,
         teacherName: req.user.name,
       });
 
       // Create notifications for all active students in the class
       const members = await prisma.classMember.findMany({
-        where: { classId: Number(classId), status: "ACTIVE" },
+        where: { classId: parsedClassId, status: "ACTIVE" },
         select: { userId: true },
       });
       await Promise.allSettled(
@@ -84,8 +102,11 @@ router.post("/assignments", authenticateToken, authorizeRole(["TEACHER", "ADMIN"
 
 router.get("/assignments/:id", authenticateToken, async (req, res) => {
   try {
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "ID bài tập không hợp lệ" });
+
     const assignment = await prisma.assignment.findUnique({
-      where: { id: Number(req.params.id) },
+      where: { id },
       include: { class: { select: { id: true, name: true, teacherId: true } } },
     });
     if (!assignment) return res.status(404).json({ error: "Assignment not found" });
@@ -107,7 +128,9 @@ router.get("/assignments/:id", authenticateToken, async (req, res) => {
 
 router.patch("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const assignmentId = Number(req.params.id);
+    const assignmentId = parseId(req.params.id);
+    if (!assignmentId) return res.status(400).json({ error: "ID bài tập không hợp lệ" });
+
     const assignment = await prisma.assignment.findUnique({
       where: { id: assignmentId },
       include: { class: true },
@@ -119,13 +142,35 @@ router.patch("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "A
 
     const { title, description, dueDate, fileUrl, startTime, allowLate, maxScore } = req.body;
     const data = {};
-    if (title !== undefined) data.title = title;
-    if (description !== undefined) data.description = description || null;
-    if (dueDate !== undefined) data.dueDate = dueDate ? new Date(dueDate) : null;
-    if (fileUrl !== undefined) data.fileUrl = fileUrl || null;
-    if (startTime !== undefined) data.startTime = startTime ? new Date(startTime) : null;
+    if (title !== undefined) {
+      const validTitle = validateString(title, 300);
+      if (!validTitle) return res.status(400).json({ error: "Tiêu đề bài tập không hợp lệ (tối đa 300 ký tự)" });
+      data.title = validTitle;
+    }
+    if (description !== undefined) {
+      if (typeof description === "string" && description.length > 50000) {
+        return res.status(400).json({ error: "Mô tả không được quá 50000 ký tự" });
+      }
+      data.description = description || null;
+    }
+    if (dueDate !== undefined) {
+      if (dueDate && !isValidDate(dueDate)) return res.status(400).json({ error: "Hạn nộp không hợp lệ" });
+      data.dueDate = dueDate ? new Date(dueDate) : null;
+    }
+    if (fileUrl !== undefined) {
+      if (fileUrl && typeof fileUrl === "string" && fileUrl.length > 2000) return res.status(400).json({ error: "URL file không hợp lệ" });
+      data.fileUrl = fileUrl || null;
+    }
+    if (startTime !== undefined) {
+      if (startTime && !isValidDate(startTime)) return res.status(400).json({ error: "Thời gian bắt đầu không hợp lệ" });
+      data.startTime = startTime ? new Date(startTime) : null;
+    }
     if (allowLate !== undefined) data.allowLate = allowLate === true;
-    if (maxScore !== undefined) data.maxScore = Math.max(0, parseInt(maxScore, 10) || 10);
+    if (maxScore !== undefined) {
+      const parsed = parseInt(maxScore, 10);
+      if (isNaN(parsed) || parsed < 0 || parsed > 1000) return res.status(400).json({ error: "Điểm tối đa phải từ 0 đến 1000" });
+      data.maxScore = parsed;
+    }
 
     const updated = await prisma.assignment.update({
       where: { id: assignmentId },
@@ -140,7 +185,10 @@ router.patch("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "A
 
 router.get("/classes/:classId/assignments", authenticateToken, async (req, res) => {
   try {
-    const access = await checkClassAccess(req, req.params.classId);
+    const classId = parseId(req.params.classId);
+    if (!classId) return res.status(400).json({ error: "classId không hợp lệ" });
+
+    const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
     const paginate = req.query.page !== undefined;
@@ -148,7 +196,7 @@ router.get("/classes/:classId/assignments", authenticateToken, async (req, res) 
     const take = Math.min(Number(req.query.limit) || 50, 100);
 
     const findOpts = {
-      where: { classId: Number(req.params.classId) },
+      where: { classId: classId },
       include: { _count: { select: { submissions: true } } },
       orderBy: { dueDate: "asc" },
     };
@@ -171,7 +219,9 @@ router.get("/classes/:classId/assignments", authenticateToken, async (req, res) 
 
 router.delete("/assignments/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
-    const assignmentId = Number(req.params.id);
+    const assignmentId = parseId(req.params.id);
+    if (!assignmentId) return res.status(400).json({ error: "ID bài tập không hợp lệ" });
+
     const assignment = await prisma.assignment.findUnique({
       where: { id: assignmentId },
       include: { class: true },

@@ -7,6 +7,7 @@ import prisma from "../db.js";
 import { authenticateToken } from "../middleware/auth.js";
 import { getIO } from "../socket.js";
 import { createNotification } from "./notifications.js";
+import { parseId } from "./_helpers.js";
 
 const router = express.Router();
 
@@ -14,20 +15,31 @@ router.post("/comments", authenticateToken, async (req, res) => {
   try {
     const { content, assignmentId, submissionId } = req.body;
     if (!assignmentId && !submissionId) return res.status(400).json({ error: "Target required" });
+    if (!content || typeof content !== "string" || !content.trim()) {
+      return res.status(400).json({ error: "Nội dung bình luận không được trống" });
+    }
+    if (content.length > 5000) {
+      return res.status(400).json({ error: "Nội dung bình luận không được quá 5000 ký tự" });
+    }
+    if (assignmentId && !parseId(assignmentId)) return res.status(400).json({ error: "assignmentId không hợp lệ" });
+    if (submissionId && !parseId(submissionId)) return res.status(400).json({ error: "submissionId không hợp lệ" });
+
+    const parsedAssignmentId = assignmentId ? parseId(assignmentId) : null;
+    const parsedSubmissionId = submissionId ? parseId(submissionId) : null;
 
     // If submissionId provided but no assignmentId, resolve it from the submission
-    let resolvedAssignmentId = assignmentId ? Number(assignmentId) : null;
-    if (submissionId && !resolvedAssignmentId) {
-      const sub = await prisma.submission.findUnique({ where: { id: Number(submissionId) }, select: { assignmentId: true } });
+    let resolvedAssignmentId = parsedAssignmentId;
+    if (parsedSubmissionId && !resolvedAssignmentId) {
+      const sub = await prisma.submission.findUnique({ where: { id: parsedSubmissionId }, select: { assignmentId: true } });
       if (sub) resolvedAssignmentId = sub.assignmentId;
     }
 
     const comment = await prisma.comment.create({
       data: {
-        content,
+        content: content.trim(),
         userId: req.user.id,
         assignmentId: resolvedAssignmentId,
-        submissionId: submissionId ? Number(submissionId) : null,
+        submissionId: parsedSubmissionId,
       },
       include: { user: { select: { id: true, name: true, role: true } } },
     });
@@ -39,8 +51,8 @@ router.post("/comments", authenticateToken, async (req, res) => {
         author_name: comment.user.name,
         author_id: comment.userId,
         created_at: comment.createdAt,
-        assignmentId: assignmentId ? Number(assignmentId) : null,
-        submissionId: submissionId ? Number(submissionId) : null,
+        assignmentId: parsedAssignmentId,
+        submissionId: parsedSubmissionId,
       };
       const io = getIO();
       io.emit("comment:new", payload);
@@ -54,7 +66,7 @@ router.post("/comments", authenticateToken, async (req, res) => {
       if (submissionId) {
         // Get submission owner to notify
         const sub = await prisma.submission.findUnique({
-          where: { id: Number(submissionId) },
+          where: { id: parsedSubmissionId },
           include: { assignment: { select: { title: true, classId: true, class: { select: { teacherId: true } } } } },
         });
         if (sub) {
@@ -91,8 +103,16 @@ router.get("/comments", authenticateToken, async (req, res) => {
     const take = Math.min(Number(req.query.limit) || 50, 100);
 
     const filter = {};
-    if (assignmentId) filter.assignmentId = Number(assignmentId);
-    if (submissionId) filter.submissionId = Number(submissionId);
+    if (assignmentId) {
+      const parsed = parseId(assignmentId);
+      if (!parsed) return res.status(400).json({ error: "assignmentId không hợp lệ" });
+      filter.assignmentId = parsed;
+    }
+    if (submissionId) {
+      const parsed = parseId(submissionId);
+      if (!parsed) return res.status(400).json({ error: "submissionId không hợp lệ" });
+      filter.submissionId = parsed;
+    }
 
     const findOpts = {
       where: filter,
@@ -119,7 +139,8 @@ router.get("/comments", authenticateToken, async (req, res) => {
 /** Update comment: author or teacher of assignment's class or admin */
 router.patch("/comments/:id", authenticateToken, async (req, res) => {
   try {
-    const commentId = Number(req.params.id);
+    const commentId = parseId(req.params.id);
+    if (!commentId) return res.status(400).json({ error: "ID bình luận không hợp lệ" });
     const comment = await prisma.comment.findUnique({
       where: { id: commentId },
       include: {
@@ -136,6 +157,7 @@ router.patch("/comments/:id", authenticateToken, async (req, res) => {
     }
     const { content } = req.body;
     if (typeof content !== "string" || !content.trim()) return res.status(400).json({ error: "content required" });
+    if (content.length > 5000) return res.status(400).json({ error: "Nội dung bình luận không được quá 5000 ký tự" });
     const updated = await prisma.comment.update({
       where: { id: commentId },
       data: { content: content.trim() },
@@ -150,7 +172,8 @@ router.patch("/comments/:id", authenticateToken, async (req, res) => {
 /** Delete comment: author or teacher of assignment's class or admin */
 router.delete("/comments/:id", authenticateToken, async (req, res) => {
   try {
-    const commentId = Number(req.params.id);
+    const commentId = parseId(req.params.id);
+    if (!commentId) return res.status(400).json({ error: "ID bình luận không hợp lệ" });
     const comment = await prisma.comment.findUnique({
       where: { id: commentId },
       include: {
