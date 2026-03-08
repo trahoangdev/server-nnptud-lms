@@ -9,12 +9,49 @@ import { authenticateToken } from "../middleware/auth.js";
 import prisma from "../db.js";
 import { getIO } from "../socket.js";
 import { parseId } from "./_helpers.js";
+import { createNotification } from "./notifications.js";
 
 const router = express.Router();
 
 // Generate a unique 6-char uppercase room code
 function generateRoomCode() {
   return crypto.randomBytes(3).toString("hex").toUpperCase(); // e.g. "A1B2C3"
+}
+
+// ─── Helper: create a system message and emit via socket ───
+async function createSystemMessage(conversationId, content) {
+  const message = await prisma.message.create({
+    data: {
+      conversationId,
+      senderId: 0, // system
+      content,
+      type: "system",
+    },
+  });
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { updatedAt: new Date() },
+  });
+  const formatted = {
+    id: String(message.id),
+    senderId: "0",
+    senderName: "Hệ thống",
+    senderRole: "system",
+    content: message.content,
+    type: "system",
+    time: formatTime(message.createdAt),
+    date: formatDate(message.createdAt),
+    isOwn: false,
+    status: "delivered",
+    conversationId: String(conversationId),
+  };
+  try {
+    const io = getIO();
+    io.to(`conversation:${conversationId}`).emit("message:new", formatted);
+  } catch (e) {
+    console.error("System message socket error:", e.message);
+  }
+  return formatted;
 }
 
 // ─── GET /api/conversations — list user's conversations ───
@@ -63,8 +100,14 @@ router.get("/conversations", authenticateToken, async (req, res) => {
 
         // Get sender name for last message
         let lastMsgSender = null;
+        let lastMsgType = null;
         if (lastMsg) {
-          lastMsgSender = userMap[lastMsg.senderId]?.name || "Unknown";
+          lastMsgType = lastMsg.type || "user";
+          if (lastMsg.senderId === 0) {
+            lastMsgSender = "Hệ thống";
+          } else {
+            lastMsgSender = userMap[lastMsg.senderId]?.name || "Unknown";
+          }
         }
 
         // Count unread messages (messages after lastReadAt)
@@ -224,6 +267,40 @@ router.post("/conversations", authenticateToken, async (req, res) => {
       },
     });
 
+    // System messages: log all members who were added
+    try {
+      const allMemberUsers = await prisma.user.findMany({
+        where: { id: { in: finalMemberIds } },
+        select: { id: true, name: true, role: true },
+      });
+
+      // Creator created the conversation
+      const creator = allMemberUsers.find((u) => u.id === userId);
+      await createSystemMessage(conversation.id, `${creator?.name || "Ai đó"} đã tạo hội thoại`);
+
+      // Log other members being added
+      const otherMembers = allMemberUsers.filter((u) => u.id !== userId);
+      if (otherMembers.length > 0) {
+        const names = otherMembers.map((u) => u.name).join(", ");
+        await createSystemMessage(conversation.id, `${names} đã được thêm vào hội thoại`);
+      }
+
+      // Notify members (except creator)
+      await Promise.allSettled(
+        otherMembers.map((u) =>
+          createNotification({
+            userId: u.id,
+            type: "conversation",
+            title: "Hội thoại mới",
+            message: `Bạn đã được thêm vào hội thoại '${convName}'`,
+            link: u.role === "STUDENT" ? "/student/conversations" : "/conversations",
+          })
+        )
+      );
+    } catch (e) {
+      console.error("Conversation notification error:", e.message);
+    }
+
     res.status(201).json({ ...conversation, roomCode });
   } catch (err) {
     console.error("POST /conversations error:", err);
@@ -267,6 +344,31 @@ router.post("/conversations/join", authenticateToken, async (req, res) => {
       },
     });
 
+    // System message: user joined
+    await createSystemMessage(conversation.id, `${req.user.name} đã tham gia hội thoại`);
+
+    // Notify existing members about new member
+    try {
+      const existingMemberIds = conversation.members.map((m) => m.userId).filter((id) => id !== userId);
+      const memberUsers = await prisma.user.findMany({
+        where: { id: { in: existingMemberIds } },
+        select: { id: true, role: true },
+      });
+      await Promise.allSettled(
+        memberUsers.map((u) =>
+          createNotification({
+            userId: u.id,
+            type: "conversation",
+            title: "Thành viên mới",
+            message: `${req.user.name} đã tham gia hội thoại '${conversation.name}'`,
+            link: u.role === "STUDENT" ? "/student/conversations" : "/conversations",
+          })
+        )
+      );
+    } catch (e) {
+      console.error("Join notification error:", e.message);
+    }
+
     res.json({
       success: true,
       conversationId: conversation.id,
@@ -275,6 +377,35 @@ router.post("/conversations/join", authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("POST /conversations/join error:", err);
     res.status(500).json({ error: "Lỗi tham gia hội thoại" });
+  }
+});
+
+// ─── POST /api/conversations/:id/leave — leave a conversation ───
+router.post("/conversations/:id/leave", authenticateToken, async (req, res) => {
+  try {
+    const conversationId = parseId(req.params.id);
+    if (!conversationId) return res.status(400).json({ error: "ID hội thoại không hợp lệ" });
+    const userId = req.user.id;
+
+    const membership = await prisma.conversationMember.findUnique({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+    if (!membership) {
+      return res.status(400).json({ error: "Bạn không phải thành viên hội thoại này" });
+    }
+
+    // Remove member
+    await prisma.conversationMember.delete({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+
+    // System message: user left
+    await createSystemMessage(conversationId, `${req.user.name} đã rời khỏi hội thoại`);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /conversations/:id/leave error:", err);
+    res.status(500).json({ error: "Lỗi rời hội thoại" });
   }
 });
 
@@ -418,6 +549,7 @@ router.get(
             senderName: sender?.name || "Unknown",
             senderRole: (sender?.role || "STUDENT").toLowerCase(),
             content: msg.isRecalled ? "Tin nhắn đã được thu hồi" : msg.content,
+            type: msg.type || "user",
             time: formatTime(msg.createdAt),
             date: formatDate(msg.createdAt),
             isOwn: msg.senderId === userId,
@@ -510,6 +642,7 @@ router.post(
         senderName: sender?.name || "Unknown",
         senderRole: (sender?.role || "STUDENT").toLowerCase(),
         content: message.content,
+        type: "user",
         time: formatTime(message.createdAt),
         date: formatDate(message.createdAt),
         isOwn: false, // will be set client-side
@@ -520,6 +653,39 @@ router.post(
       // Emit to conversation room
       const io = getIO();
       io.to(`conversation:${conversationId}`).emit("message:new", formatted);
+
+      // Notify other members (skip sender)
+      try {
+        const convMembers = await prisma.conversationMember.findMany({
+          where: { conversationId, userId: { not: userId } },
+          select: { userId: true },
+        });
+        const conv = await prisma.conversation.findUnique({
+          where: { id: conversationId },
+          select: { name: true },
+        });
+        const convName = conv?.name || "Hội thoại";
+        const truncatedContent = content.trim().length > 80
+          ? content.trim().slice(0, 80) + "..."
+          : content.trim();
+        const memberUsers = await prisma.user.findMany({
+          where: { id: { in: convMembers.map((m) => m.userId) } },
+          select: { id: true, role: true },
+        });
+        await Promise.allSettled(
+          memberUsers.map((u) =>
+            createNotification({
+              userId: u.id,
+              type: "message",
+              title: `Tin nhắn mới - ${convName}`,
+              message: `${sender?.name || "Ai đó"}: ${truncatedContent}`,
+              link: u.role === "STUDENT" ? "/student/conversations" : "/conversations",
+            })
+          )
+        );
+      } catch (e) {
+        console.error("Message notification error:", e.message);
+      }
 
       res.status(201).json(formatted);
     } catch (err) {
