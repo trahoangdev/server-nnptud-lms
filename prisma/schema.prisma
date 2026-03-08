@@ -237,6 +237,8 @@ model Message {
   conversationId Int
   senderId       Int
   content        String
+  type           String   @default("user") // "user" | "system"
+  isRecalled     Boolean  @default(false)
   createdAt      DateTime @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)

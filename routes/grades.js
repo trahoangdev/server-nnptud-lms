@@ -5,7 +5,7 @@
 import express from "express";
 import prisma from "../db.js";
 import { authenticateToken, authorizeRole } from "../middleware/auth.js";
-import { checkClassAccess, logActivity, getClientIP } from "./_helpers.js";
+import { checkClassAccess, logActivity, getClientIP, parseId } from "./_helpers.js";
 import { getIO } from "../socket.js";
 import { createNotification } from "./notifications.js";
 
@@ -14,8 +14,17 @@ const router = express.Router();
 router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
     const { submissionId, score } = req.body;
+
+    const parsedSubmissionId = parseId(submissionId);
+    if (!parsedSubmissionId) return res.status(400).json({ error: "submissionId không hợp lệ" });
+    if (score === undefined || score === null || score === "") {
+      return res.status(400).json({ error: "Vui lòng nhập điểm" });
+    }
+    const numScore = parseFloat(score);
+    if (isNaN(numScore)) return res.status(400).json({ error: "Điểm phải là số" });
+
     const submission = await prisma.submission.findUnique({
-      where: { id: Number(submissionId) },
+      where: { id: parsedSubmissionId },
       include: { assignment: true },
     });
     if (!submission) return res.status(404).json({ error: "Submission not found" });
@@ -24,16 +33,15 @@ router.post("/grades", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), a
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
     const maxScore = submission.assignment.maxScore ?? 10;
-    const numScore = parseFloat(score);
     if (numScore < 0 || numScore > maxScore) {
       return res.status(400).json({ error: `Score must be between 0 and ${maxScore}` });
     }
 
     const grade = await prisma.grade.upsert({
-      where: { submissionId: Number(submissionId) },
+      where: { submissionId: parsedSubmissionId },
       update: { score: numScore, gradedById: req.user.id, gradedAt: new Date() },
       create: {
-        submissionId: Number(submissionId),
+        submissionId: parsedSubmissionId,
         score: numScore,
         gradedById: req.user.id,
       },

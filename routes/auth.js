@@ -11,16 +11,45 @@ import { upload, logActivity, getClientIP } from "./_helpers.js";
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey123";
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const VALID_ROLES = ["STUDENT", "TEACHER"];
 
 router.post("/register", async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) return res.status(400).json({ error: "Email already exists" });
+
+    // Validate required fields
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "Tên không được để trống" });
+    }
+    if (name.trim().length > 100) {
+      return res.status(400).json({ error: "Tên không được quá 100 ký tự" });
+    }
+    if (!email || typeof email !== "string" || !email.trim()) {
+      return res.status(400).json({ error: "Email không được để trống" });
+    }
+    if (!EMAIL_REGEX.test(email.trim())) {
+      return res.status(400).json({ error: "Email không đúng định dạng" });
+    }
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "Mật khẩu không được để trống" });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Mật khẩu phải có ít nhất 6 ký tự" });
+    }
+    if (password.length > 128) {
+      return res.status(400).json({ error: "Mật khẩu không được quá 128 ký tự" });
+    }
+    if (role && !VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: "Vai trò không hợp lệ" });
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email: email.trim() } });
+    if (existing) return res.status(400).json({ error: "Email đã được sử dụng" });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
-      data: { name, email, password: hashedPassword, role: role || "STUDENT", status: "ACTIVE" },
+      data: { name: name.trim(), email: email.trim().toLowerCase(), password: hashedPassword, role: role || "STUDENT", status: "ACTIVE" },
     });
 
     await logActivity({
@@ -45,12 +74,18 @@ router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || typeof email !== "string" || !email.trim()) {
-      return res.status(400).json({ error: "Email is required" });
+      return res.status(400).json({ error: "Vui lòng nhập email" });
+    }
+    if (!EMAIL_REGEX.test(email.trim())) {
+      return res.status(400).json({ error: "Email không đúng định dạng" });
     }
     if (!password || typeof password !== "string") {
-      return res.status(400).json({ error: "Password is required" });
+      return res.status(400).json({ error: "Vui lòng nhập mật khẩu" });
     }
-    const user = await prisma.user.findUnique({ where: { email: email.trim() } });
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Mật khẩu phải có ít nhất 6 ký tự" });
+    }
+    const user = await prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
     if (!user) return res.status(400).json({ error: "Email hoặc mật khẩu không đúng" });
     if (user.status && user.status !== "ACTIVE") return res.status(403).json({ error: "Tài khoản đã bị khóa" });
 
@@ -104,15 +139,27 @@ router.patch("/me", authenticateToken, async (req, res) => {
     const { name, email } = req.body;
     const updateData = {};
 
-    if (name && typeof name === "string" && name.trim()) {
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ error: "Tên không được để trống" });
+      }
+      if (name.trim().length > 100) {
+        return res.status(400).json({ error: "Tên không được quá 100 ký tự" });
+      }
       updateData.name = name.trim();
     }
-    if (email && typeof email === "string" && email.trim()) {
-      const existing = await prisma.user.findUnique({ where: { email: email.trim() } });
+    if (email !== undefined) {
+      if (typeof email !== "string" || !email.trim()) {
+        return res.status(400).json({ error: "Email không được để trống" });
+      }
+      if (!EMAIL_REGEX.test(email.trim())) {
+        return res.status(400).json({ error: "Email không đúng định dạng" });
+      }
+      const existing = await prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
       if (existing && existing.id !== userId) {
         return res.status(400).json({ error: "Email đã được sử dụng" });
       }
-      updateData.email = email.trim();
+      updateData.email = email.trim().toLowerCase();
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -149,11 +196,17 @@ router.patch("/me/password", authenticateToken, async (req, res) => {
     const userId = Number(req.user.id);
     const { currentPassword, newPassword } = req.body;
 
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: "Vui lòng nhập mật khẩu hiện tại và mật khẩu mới" });
+    if (!currentPassword || typeof currentPassword !== "string") {
+      return res.status(400).json({ error: "Vui lòng nhập mật khẩu hiện tại" });
+    }
+    if (!newPassword || typeof newPassword !== "string") {
+      return res.status(400).json({ error: "Vui lòng nhập mật khẩu mới" });
     }
     if (newPassword.length < 6) {
       return res.status(400).json({ error: "Mật khẩu mới phải có ít nhất 6 ký tự" });
+    }
+    if (newPassword.length > 128) {
+      return res.status(400).json({ error: "Mật khẩu không được quá 128 ký tự" });
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });

@@ -40,7 +40,34 @@ const storage = new CloudinaryStorage({
   },
 });
 
-export const upload = multer({ storage });
+const ALLOWED_MIMETYPES = new Set([
+  // Images
+  "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
+  // Documents
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  // Text/Code
+  "text/plain", "text/csv", "text/markdown",
+  // Archives
+  "application/zip", "application/x-rar-compressed", "application/gzip",
+]);
+
+export const upload = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_MIMETYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Loại file không được hỗ trợ: ${file.mimetype}`));
+    }
+  },
+});
 
 /* ================== AUDIT LOG HELPER ================== */
 
@@ -127,6 +154,45 @@ export async function checkClassAccess(req, classId, needOwner = false) {
     if (member) return { ok: true, class: c };
   }
   return { ok: false, status: 403, message: "Access denied" };
+}
+
+/* ================== VALIDATION HELPERS ================== */
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Parse route/query param to integer, return null if invalid.
+ */
+export function parseId(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Validate a string field: non-empty after trim, within maxLength.
+ * Returns trimmed string or null.
+ */
+export function validateString(value, maxLength = 500) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) return null;
+  return trimmed;
+}
+
+/**
+ * Validate email format.
+ */
+export function isValidEmail(value) {
+  return typeof value === "string" && EMAIL_REGEX.test(value.trim());
+}
+
+/**
+ * Validate ISO date string.
+ */
+export function isValidDate(value) {
+  if (!value) return false;
+  const d = new Date(value);
+  return !isNaN(d.getTime());
 }
 
 /* ================== ADMIN SETTINGS DEFAULTS ================== */

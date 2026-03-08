@@ -12,7 +12,10 @@ router.post("/upload", authenticateToken, (req, res, next) => {
   upload.single("file")(req, res, (err) => {
     if (err) {
       console.error("Multer/Cloudinary Error:", err);
-      return res.status(500).json({ error: err.message || "File upload failed" });
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({ error: "File quá lớn. Tối đa 50MB" });
+      }
+      return res.status(400).json({ error: err.message || "File upload failed" });
     }
     next();
   });
