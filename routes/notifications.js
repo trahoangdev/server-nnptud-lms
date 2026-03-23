@@ -106,4 +106,16 @@ router.patch("/notifications/read-all", authenticateToken, async (req, res) => {
   }
 });
 
+/** DELETE /api/notifications/read — delete all read notifications */
+router.delete("/notifications/read", authenticateToken, async (req, res) => {
+  try {
+    const result = await prisma.notification.deleteMany({
+      where: { userId: req.user.id, isRead: true },
+    });
+    res.json({ message: "Đã xóa thông báo đã đọc", count: result.count });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
