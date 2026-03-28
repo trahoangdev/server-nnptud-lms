@@ -1,4 +1,4 @@
-// Prisma schema - bám PRD §4 Entities & Data model
+// Prisma schema - Entities & Data model
 
 generator client {
   provider = "prisma-client-js"

@@ -263,6 +263,44 @@ router.get("/classes/:id/gradebook", authenticateToken, authorizeRole(["TEACHER"
   }
 });
 
+/** Leave class — student rời lớp */
+router.post("/classes/:id/leave", authenticateToken, authorizeRole(["STUDENT"]), async (req, res) => {
+  try {
+    const classId = parseId(req.params.id);
+    if (!classId) return res.status(400).json({ error: "ID lớp không hợp lệ" });
+
+    const membership = await prisma.classMember.findUnique({
+      where: { classId_userId: { classId, userId: req.user.id } },
+    });
+    if (!membership || membership.status !== "ACTIVE") {
+      return res.status(400).json({ error: "Bạn không phải thành viên của lớp này" });
+    }
+
+    await prisma.classMember.update({
+      where: { id: membership.id },
+      data: { status: "LEFT" },
+    });
+
+    const classInfo = await prisma.class.findUnique({ where: { id: classId }, select: { name: true } });
+
+    await logActivity({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: "student",
+      action: "Rời lớp học",
+      actionType: "update",
+      resource: "Class",
+      resourceId: classId,
+      details: `Sinh viên '${req.user.name}' đã rời lớp '${classInfo?.name ?? classId}'`,
+      ipAddress: getClientIP(req),
+    });
+
+    res.json({ message: "Đã rời lớp thành công" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.patch("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMIN"]), async (req, res) => {
   try {
     const id = parseId(req.params.id);
