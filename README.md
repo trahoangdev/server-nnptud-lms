@@ -354,21 +354,6 @@ npm run seed
 
 ---
 
-## 📖 Tài liệu chi tiết
-
-Xem thêm tại thư mục [`/docs`](../docs/):
-
-| File | Nội dung |
-|------|---------|
-| [01 – Tổng quan dự án](../docs/01-tong-quan-du-an.md) | Kiến trúc, tech stack, roadmap |
-| [03 – Backend Plan](../docs/03-backend-plan.md) | Kế hoạch refactor, API mới, security |
-| [05 – Database Design](../docs/05-database-design.md) | ERD, chi tiết models, indexes |
-| [06 – API Specification](../docs/06-api-specification.md) | Đặc tả API đầy đủ request/response |
-| [07 – Realtime Socket](../docs/07-realtime-socket.md) | Socket.io architecture, events |
-| [09 – Deployment Guide](../docs/09-deployment-guide.md) | Docker, VPS, CI/CD |
-
----
-
 ## 👨‍💻 Author
 
 **Team NNPTUD** – Đề tài: Hệ thống LMS Mini
