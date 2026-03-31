@@ -130,17 +130,34 @@ router.post("/classes/join", authenticateToken, authorizeRole(["STUDENT"]), asyn
     const existing = await prisma.classMember.findUnique({
       where: { classId_userId: { classId: classRow.id, userId: req.user.id } },
     });
-    if (existing) {
-      if (existing.status === "ACTIVE") return res.status(400).json({ error: "Already in this class" });
-      await prisma.classMember.update({
-        where: { id: existing.id },
-        data: { status: "ACTIVE" },
+    if (existing && existing.status === "ACTIVE") return res.status(400).json({ error: "Already in this class" });
+
+    // Transaction: join class + tạo notification cho teacher
+    await prisma.$transaction(async (tx) => {
+      if (existing) {
+        await tx.classMember.update({
+          where: { id: existing.id },
+          data: { status: "ACTIVE" },
+        });
+      } else {
+        await tx.classMember.create({
+          data: { classId: classRow.id, userId: req.user.id, status: "ACTIVE" },
+        });
+      }
+
+      // Thông báo cho teacher biết có sinh viên mới tham gia
+      await tx.notification.create({
+        data: {
+          userId: classRow.teacherId,
+          type: "SYSTEM",
+          title: "Sinh viên mới tham gia lớp",
+          message: `${req.user.name} đã tham gia lớp '${classRow.name}'`,
+          relatedId: classRow.id,
+          relatedType: "Class",
+        },
       });
-    } else {
-      await prisma.classMember.create({
-        data: { classId: classRow.id, userId: req.user.id, status: "ACTIVE" },
-      });
-    }
+    });
+
     res.json({ message: "Joined successfully", classId: classRow.id, className: classRow.name });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -339,22 +356,34 @@ router.delete("/classes/:id", authenticateToken, authorizeRole(["TEACHER", "ADMI
     const access = await checkClassAccess(req, classId);
     if (!access.ok) return res.status(access.status).json({ error: access.message });
 
-    // Soft delete: archive thay vì xóa vĩnh viễn
-    const archived = await prisma.class.update({
-      where: { id: classId },
-      data: { status: "ARCHIVED" },
-    });
+    // Transaction: archive class + deactivate members + log activity
+    const archived = await prisma.$transaction(async (tx) => {
+      const archivedClass = await tx.class.update({
+        where: { id: classId },
+        data: { status: "ARCHIVED" },
+      });
 
-    await logActivity({
-      userId: req.user.id,
-      userName: req.user.name,
-      userRole: req.user.role.toLowerCase(),
-      action: "Xóa (lưu trữ) lớp học",
-      actionType: "delete",
-      resource: "Class",
-      resourceId: req.params.id,
-      details: `Lớp '${archived.name}' đã được lưu trữ (archived)`,
-      ipAddress: getClientIP(req),
+      // Deactivate tất cả thành viên trong lớp
+      await tx.classMember.updateMany({
+        where: { classId, status: "ACTIVE" },
+        data: { status: "LEFT" },
+      });
+
+      await tx.activityLog.create({
+        data: {
+          userId: req.user.id,
+          userName: req.user.name,
+          userRole: req.user.role.toLowerCase(),
+          action: "Xóa (lưu trữ) lớp học",
+          actionType: "delete",
+          resource: "Class",
+          resourceId: String(classId),
+          details: `Lớp '${archivedClass.name}' đã được lưu trữ (archived) và tất cả thành viên đã bị deactivate`,
+          ipAddress: getClientIP(req),
+        },
+      });
+
+      return archivedClass;
     });
 
     res.json({ message: "Class archived", class: archived });
